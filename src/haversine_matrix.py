@@ -47,13 +47,14 @@ import pandas as pd
 
 
 EARTH_RADIUS_KM: float = 6371.0
-SCALE_FACTOR: int = 1000          # km → integer (km × 1000) for OR-Tools
-SAMPLE_SIZE: int = 500             # default stratified sample size
+SCALE_FACTOR: int = 1000  # km → integer (km × 1000) for OR-Tools
+SAMPLE_SIZE: int = 500  # default stratified sample size
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. STRATIFIED SPATIAL SAMPLING
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def stratified_sample(
     df: pd.DataFrame,
@@ -118,9 +119,7 @@ def stratified_sample(
 
     # Proportional quota per zip, floored to integers summing to n
     zip_df = (
-        clean.groupby("customer_zip_code_prefix")
-        .size()
-        .reset_index(name="pool_size")
+        clean.groupby("customer_zip_code_prefix").size().reset_index(name="pool_size")
     )
     zip_df["zip_order_count"] = (
         zip_df["customer_zip_code_prefix"].map(zip_counts).fillna(0)
@@ -153,8 +152,9 @@ def stratified_sample(
             random_state=int(rng.integers(0, 2**31)),
             replace=False,
         )
-        parts.append(drawn[["customer_lat", "customer_lon",
-                             "customer_zip_code_prefix"]])
+        parts.append(
+            drawn[["customer_lat", "customer_lon", "customer_zip_code_prefix"]]
+        )
 
     sample_raw = pd.concat(parts, ignore_index=True)
 
@@ -167,9 +167,8 @@ def stratified_sample(
             how="left",
             indicator=True,
         )
-        remaining_pool = (
-            remaining_pool[remaining_pool["_merge"] == "left_only"]
-            .drop(columns="_merge")
+        remaining_pool = remaining_pool[remaining_pool["_merge"] == "left_only"].drop(
+            columns="_merge"
         )
         if len(remaining_pool) < needed_extra:
             raise ValueError(
@@ -197,7 +196,7 @@ def stratified_sample(
     )
     sample_df = sample_raw.reset_index(drop=True)
     sample_df.index.name = "node_id"
-    sample_df = sample_df.reset_index()   # node_id becomes explicit column
+    sample_df = sample_df.reset_index()  # node_id becomes explicit column
 
     return sample_df
 
@@ -205,6 +204,7 @@ def stratified_sample(
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. VECTORISED HAVERSINE DISTANCE MATRIX
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def build_distance_matrix(coords: np.ndarray) -> np.ndarray:
     """
@@ -230,13 +230,13 @@ def build_distance_matrix(coords: np.ndarray) -> np.ndarray:
     1 km → 1000 units, 0.5 km → 500 units, preserving 3 decimal places.
     OR-Tools interprets these raw integers as arc costs.
     """
-    coords_rad = np.radians(coords.astype(np.float64))   # (N, 2)
-    lat = coords_rad[:, 0]   # (N,)
-    lon = coords_rad[:, 1]   # (N,)
+    coords_rad = np.radians(coords.astype(np.float64))  # (N, 2)
+    lat = coords_rad[:, 0]  # (N,)
+    lon = coords_rad[:, 1]  # (N,)
 
     # Broadcasting: (N,1) − (1,N) → (N,N) difference matrices
-    dlat = lat[:, None] - lat[None, :]   # (N, N)
-    dlon = lon[:, None] - lon[None, :]   # (N, N)
+    dlat = lat[:, None] - lat[None, :]  # (N, N)
+    dlon = lon[:, None] - lon[None, :]  # (N, N)
 
     a = (
         np.sin(dlat / 2) ** 2
@@ -250,6 +250,7 @@ def build_distance_matrix(coords: np.ndarray) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. SAVE / LOAD
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def save_distance_matrix(
     matrix: np.ndarray,
@@ -269,6 +270,7 @@ def load_distance_matrix(path: str | Path = "data/distance_matrix.npy") -> np.nd
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def validate_matrix(matrix: np.ndarray) -> dict:
     """
@@ -317,6 +319,7 @@ def validate_matrix(matrix: np.ndarray) -> dict:
 # 5. MAIN PIPELINE ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def run(
     parquet_path: str | Path = "data/master_df.parquet",
     matrix_path: str | Path = "data/distance_matrix.npy",
@@ -352,17 +355,21 @@ def run(
 
     print(f"[3/5] Stratified spatial sample → {n} representative points …")
     sample_df = stratified_sample(sp, n=n, random_state=random_state)
-    print(f"      Sample shape: {sample_df.shape}  |  "
-          f"Unique zips: {sample_df['customer_zip_code_prefix'].nunique()}")
+    print(
+        f"      Sample shape: {sample_df.shape}  |  "
+        f"Unique zips: {sample_df['customer_zip_code_prefix'].nunique()}"
+    )
 
     coords = sample_df[["customer_lat", "customer_lon"]].to_numpy()
 
     print(f"[4/5] Building {n}×{n} Haversine distance matrix (vectorised) …")
     matrix = build_distance_matrix(coords)
     stats = validate_matrix(matrix)
-    print(f"      min={stats['min_km']:.2f} km  "
-          f"mean={stats['mean_km']:.2f} km  "
-          f"max={stats['max_km']:.2f} km  ✓")
+    print(
+        f"      min={stats['min_km']:.2f} km  "
+        f"mean={stats['mean_km']:.2f} km  "
+        f"max={stats['max_km']:.2f} km  ✓"
+    )
 
     print(f"[5/5] Saving outputs …")
     save_distance_matrix(matrix, matrix_path)
@@ -378,5 +385,5 @@ def run(
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    sample, mat, stats = run()
+    sample, mat, stats = run(parquet_path="data/master_df_v2.parquet")
     print("\nValidation stats:", stats)
