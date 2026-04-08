@@ -474,8 +474,8 @@ def solve_sdvrp_hybrid(
 
 
 def run_all_zones_sdvrp(
-    fwd_zones: dict,
-    rev_zones: dict,
+    fwd_zones: list[dict] | dict,
+    rev_zones: list[dict] | dict,
     fwd_kpi_df: pd.DataFrame,
     rev_kpi_df: pd.DataFrame,
     num_vehicles: int = 5,
