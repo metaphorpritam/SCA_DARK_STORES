@@ -1,7 +1,5 @@
 # Dark Store Placement + Integrated Logistics Optimisation
 
-> PGDBA · Supply Chain Analytics · ISI Kolkata / IIM Calcutta / IIT Kharagpur · April 2026
-
 Optimal placement of dark stores (micro-fulfilment centres) and integrated forward + reverse vehicle routing over the [Olist Brazilian E-Commerce](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) dataset. Rather than treating delivery and returns as separate problems, we solve them jointly through a single weighted objective — placing K dark stores, routing deliveries, predicting returns, and running SDVRP hybrid routes in one end-to-end pipeline.
 
 ---
@@ -170,8 +168,8 @@ SCA_DARK_STORES/
 
 | Name | Role |
 |------|------|
-| Pritam Sarkar | Lead — Architecture · Forward VRP · SDVRP · Joint Optimiser · Report |
-| Vybhav | Co-Lead — Data Pipeline · Return ML · Reverse VRP · Scenario Analysis |
+| Pritam Sarkar | Architecture · Forward VRP · SDVRP · Joint Optimiser · Report |
+| Vybhav | Data Pipeline · Return ML · Reverse VRP · Scenario Analysis |
 | Anurag | EDA · Demand Forecasting · Results Aggregation |
 | Sneha | Clustering · Dark Store Selection · Sensitivity Analysis |
 | Pranav | VRP Node Prep · Route Parser · Baseline Comparison |
