@@ -55,42 +55,51 @@ from src.route_parser import (
 
 
 def compute_naive_baseline(
-    data_dir: str | Path = "data",
+    master_df: pd.DataFrame,
     out_dir: str | Path = "outputs",
 ) -> dict:
     """
     Compute naive routing baseline — no dark stores, no VRP.
-    Each customer assigned directly to nearest seller.
-    Uses same cost model as forward VRP: R$50 fixed + R$1.5/km.
+    Each order shipped direct from seller to customer (individual trips).
+    Uses actual customer-to-seller distances from cust_seller_dist_km
+    (computed in demand_baseline.py) and same cost model as forward VRP:
+    R$50 fixed per trip + R$1.5/km.
+
+    Parameters
+    ----------
+    master_df : pd.DataFrame
+        The same master_df loaded by run_full_pipeline (metro-filtered,
+        with cust_seller_dist_km column from demand_baseline).
+    out_dir : path for baseline_kpis_naive.csv
+
     Saves outputs/baseline_kpis_naive.csv.
     """
-    data_dir = Path(data_dir)
     out_dir = Path(out_dir)
 
-    dist_matrix = np.load(data_dir / "distance_matrix.npy")  # integer scaled ×1000
-    dist_km = dist_matrix / 1000.0
+    valid = master_df.dropna(subset=["cust_seller_dist_km"]).copy()
+    dists = valid["cust_seller_dist_km"].values
 
-    # Nearest seller per customer = min distance in each row (excluding self)
-    np.fill_diagonal(dist_km, np.inf)
-    nearest_dist_km = dist_km.min(axis=1)
-    np.fill_diagonal(dist_km, 0)
+    n_customers = len(dists)
+    total_dist_km = float(dists.sum())
+    avg_dist_km = float(dists.mean())
+    median_dist_km = float(np.median(dists))
 
-    total_dist_km = float(nearest_dist_km.sum())
-    avg_dist_km = float(nearest_dist_km.mean())
-    n_customers = len(nearest_dist_km)
+    # Naive: each customer = one delivery trip (no consolidation)
     naive_cost = FIXED_COST_PER_ROUTE * n_customers + VAR_COST_PER_KM * total_dist_km
 
     result = {
         "n_customers": n_customers,
         "total_naive_dist_km": round(total_dist_km, 2),
         "avg_naive_dist_km": round(avg_dist_km, 2),
+        "median_naive_dist_km": round(median_dist_km, 2),
         "naive_routing_cost_R$": round(naive_cost, 2),
     }
 
     pd.DataFrame([result]).to_csv(out_dir / "baseline_kpis_naive.csv", index=False)
     print(f"[compute_naive_baseline] baseline_kpis_naive.csv saved")
-    print(f"  Avg naive dist : {avg_dist_km:.2f} km")
-    print(f"  Naive cost     : R${naive_cost:.0f}")
+    print(f"  Customers      : {n_customers:,}")
+    print(f"  Avg naive dist : {avg_dist_km:.2f} km (median: {median_dist_km:.2f} km)")
+    print(f"  Naive cost     : R${naive_cost:,.0f}")
     return result
 
 
@@ -296,7 +305,7 @@ def run_full_pipeline(
     print(f"\n       {n_solved}/{len(zones)} zones solved")
 
     print("\n[4/4] Saving outputs...")
-    naive_baseline = compute_naive_baseline(data_dir=data_dir, out_dir=out_dir)
+    naive_baseline = compute_naive_baseline(master_df, out_dir=out_dir)
     routes_df, kpi_df = save_routes(zone_results, zones, out_dir, prefix="forward")
     kpi_by_zone_df = compute_kpi_by_zone(routes_df, zones, out_dir=out_dir)
 

@@ -6,7 +6,7 @@ Builds vrp_nodes.csv from master_df_v3.parquet and dark_stores_final.csv,
 then produces three scenario variants:
 
     Scenario A (Base)          → outputs/vrp_nodes_A.csv   current demand
-    Scenario B (Surge +30%)    → outputs/vrp_nodes_B.csv   all demand_kg × 1.3
+    Scenario B (Surge +30%)    → outputs/vrp_nodes_B.csv   +30% more customers + demand_kg × 1.3
     Scenario C (High Returns)  → outputs/vrp_nodes_C.csv   return_prob threshold halved (×2 flagged returners)
 
 Intermediate output:
@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import warnings
 from pathlib import Path
 
@@ -161,11 +162,15 @@ def _dark_store_row(store_id: int, store_lat: float, store_lon: float) -> dict:
     }
 
 
-def build_vrp_nodes(df: pd.DataFrame, stores_df: pd.DataFrame) -> pd.DataFrame:
+def build_vrp_nodes(
+    df: pd.DataFrame,
+    stores_df: pd.DataFrame,
+    max_per_zone: int = CUSTOMERS_PER_ZONE,
+) -> pd.DataFrame:
     """
     For each dark store zone:
       - Add 1 depot row (the dark store itself)
-      - Sample up to CUSTOMERS_PER_ZONE customer rows
+      - Sample up to max_per_zone customer rows
       - Assign node_id, type, demand_kg, time windows, is_pickup flag
     """
     df = assign_time_window(df)
@@ -192,7 +197,7 @@ def build_vrp_nodes(df: pd.DataFrame, stores_df: pd.DataFrame) -> pd.DataFrame:
         rows.append(_dark_store_row(store_id, s_lat, s_lon))
 
         # Customer sample
-        n_sample = min(CUSTOMERS_PER_ZONE, len(zone_df))
+        n_sample = min(max_per_zone, len(zone_df))
         sample = zone_df.sample(n=n_sample, random_state=int(rng.integers(0, 9999)))
 
         for seq, (_, row) in enumerate(sample.iterrows(), start=1):
@@ -242,9 +247,24 @@ def scenario_a(nodes: pd.DataFrame) -> pd.DataFrame:
     return nodes.copy()
 
 
-def scenario_b(nodes: pd.DataFrame) -> pd.DataFrame:
-    """Demand surge +30%: all delivery demand_kg × 1.3, capped at VEHICLE_CAPACITY_KG."""
-    out = nodes.copy()
+def scenario_b(
+    nodes: pd.DataFrame,
+    df: pd.DataFrame,
+    stores_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Demand surge +30%: both more customers per zone AND heavier packages.
+
+    - Samples ceil(CUSTOMERS_PER_ZONE × 1.3) = 91 customers per zone
+      (vs 70 base), stressing time windows and route count.
+    - Multiplies all delivery demand_kg × 1.3, stressing vehicle capacity.
+
+    Simulates a flash sale: more orders arrive AND each order is heavier.
+    """
+    surge_per_zone = math.ceil(CUSTOMERS_PER_ZONE * 1.3)
+    out = build_vrp_nodes(df, stores_df, max_per_zone=surge_per_zone)
+
+    # Also bump weight by 30%
     mask = out["type"] == "delivery"
     out.loc[mask, "demand_kg"] = (
         (out.loc[mask, "demand_kg"] * 1.3).clip(upper=VEHICLE_CAPACITY_KG).round(3)
@@ -334,7 +354,7 @@ def run(
     # 4. Three scenarios
     scenarios = {
         "A": scenario_a(base_nodes),
-        "B": scenario_b(base_nodes),
+        "B": scenario_b(base_nodes, df, stores),
         "C": scenario_c(base_nodes),
     }
 
@@ -366,11 +386,25 @@ def run(
 def _sanity_check(base: pd.DataFrame, scenarios: dict[str, pd.DataFrame]) -> None:
     print("\n  — Sanity checks —")
 
-    # B demand must be >= A demand for delivery nodes
-    a_del = scenarios["A"].loc[scenarios["A"]["type"] == "delivery", "demand_kg"]
-    b_del = scenarios["B"].loc[scenarios["B"]["type"] == "delivery", "demand_kg"]
-    assert (b_del.values >= a_del.values).all(), "Scenario B demand should be >= A"
-    print("  ✓ Scenario B demand ≥ Scenario A for all delivery nodes")
+    # B must have more delivery nodes AND higher total demand than A (surge scenario)
+    a_n_del = (scenarios["A"]["type"] == "delivery").sum()
+    b_n_del = (scenarios["B"]["type"] == "delivery").sum()
+    a_demand = (
+        scenarios["A"].loc[scenarios["A"]["type"] == "delivery", "demand_kg"].sum()
+    )
+    b_demand = (
+        scenarios["B"].loc[scenarios["B"]["type"] == "delivery", "demand_kg"].sum()
+    )
+    assert (
+        b_n_del >= a_n_del
+    ), f"Scenario B deliveries ({b_n_del}) should be >= A ({a_n_del})"
+    assert (
+        b_demand > a_demand
+    ), f"Scenario B demand ({b_demand:.1f}) should be > A ({a_demand:.1f})"
+    print(
+        f"  ✓ Scenario B: {b_n_del} deliveries ({b_demand:.1f} kg) > "
+        f"Scenario A: {a_n_del} deliveries ({a_demand:.1f} kg)"
+    )
 
     # C must have >= as many pickups as A
     a_pick = (scenarios["A"]["type"] == "pickup").sum()
