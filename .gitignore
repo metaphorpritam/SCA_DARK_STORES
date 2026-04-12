@@ -44,3 +44,8 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/settings.json
+# LaTeX build artefacts
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
