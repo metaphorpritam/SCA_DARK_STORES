@@ -21,12 +21,12 @@ OUTPUT:
     visualisations/dark_store_map.html         — Folium: dark stores + customer clusters + coverage circles
     visualisations/forward_routes_map.html      — Folium: forward delivery routes per zone
     visualisations/return_heatmap.html          — Folium: return probability heatmap
-    outputs/all_charts/scenario_comparison.png
-    outputs/all_charts/sdvrp_savings.png
-    outputs/all_charts/cost_breakdown.png
-    outputs/all_charts/coverage_by_zone.png
-    outputs/all_charts/vehicle_utilisation.png
-    outputs/all_charts/naive_vs_optimised.png
+    outputs/scenario_comparison.png
+    outputs/sdvrp_savings.png
+    outputs/cost_breakdown.png
+    outputs/coverage_by_zone.png
+    outputs/vehicle_utilisation.png
+    outputs/naive_vs_optimised.png
 
 INTERFACE:
     build_dark_store_map(master_df, dark_stores, vis_dir)  -> folium.Map
@@ -302,7 +302,7 @@ def build_return_heatmap(
 
 def plot_scenario_comparison(
     scenario_df: pd.DataFrame,
-    chart_dir: str | Path = "outputs/all_charts",
+    chart_dir: str | Path = "outputs",
 ) -> None:
     """Grouped bar chart: 3 scenarios × 4 KPIs."""
     chart_dir = Path(chart_dir)
@@ -350,7 +350,7 @@ def plot_scenario_comparison(
 
 def plot_sdvrp_savings(
     combined_kpi: pd.DataFrame,
-    chart_dir: str | Path = "outputs/all_charts",
+    chart_dir: str | Path = "outputs",
 ) -> None:
     """Horizontal bar chart: per-zone SDVRP cost saving (% and R$)."""
     chart_dir = Path(chart_dir)
@@ -405,7 +405,7 @@ def plot_cost_breakdown(
     fwd_kpi: pd.DataFrame,
     rev_kpi: pd.DataFrame,
     hybrid_kpi: pd.DataFrame | None,
-    chart_dir: str | Path = "outputs/all_charts",
+    chart_dir: str | Path = "outputs",
 ) -> None:
     """Stacked bar: forward vs reverse cost per zone, with hybrid overlay."""
     chart_dir = Path(chart_dir)
@@ -471,7 +471,7 @@ def plot_cost_breakdown(
 def plot_coverage_by_zone(
     master_df: pd.DataFrame,
     dark_stores: pd.DataFrame,
-    chart_dir: str | Path = "outputs/all_charts",
+    chart_dir: str | Path = "outputs",
     radius_km: float = 5.0,
 ) -> None:
     """Bar chart: % customers within 5 km of their dark store, per zone."""
@@ -545,7 +545,7 @@ def plot_coverage_by_zone(
 def plot_vehicle_utilisation(
     fwd_kpi: pd.DataFrame,
     rev_kpi: pd.DataFrame,
-    chart_dir: str | Path = "outputs/all_charts",
+    chart_dir: str | Path = "outputs",
 ) -> None:
     """Grouped bar: vehicles per zone (forward vs reverse)."""
     chart_dir = Path(chart_dir)
@@ -585,7 +585,7 @@ def plot_vehicle_utilisation(
 def plot_naive_vs_optimised(
     naive_kpi: pd.DataFrame,
     fwd_kpi: pd.DataFrame,
-    chart_dir: str | Path = "outputs/all_charts",
+    chart_dir: str | Path = "outputs",
 ) -> None:
     """Bar chart comparing naive individual delivery vs optimised VRP cost."""
     chart_dir = Path(chart_dir)
@@ -672,7 +672,7 @@ def run(
     data_dir = Path(data_dir)
     out_dir = Path(out_dir)
     vis_dir = Path(vis_dir)
-    chart_dir = out_dir / "all_charts"
+    chart_dir = out_dir
     chart_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)

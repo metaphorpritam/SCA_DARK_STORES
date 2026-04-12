@@ -1,6 +1,6 @@
 """
 Module: scenario_analysis.py
-Stage:  3-Scenario Analysis (Day 6 — Vybhav)
+Stage:  3-Scenario Analysis
 
 Loads vrp_nodes_A/B/C.csv produced by scenario_builder.py,
 runs forward + reverse VRP for each, feeds into joint optimizer,

@@ -42,6 +42,7 @@ notebooks/pritam_temp_notebooks/
 docs/architecture.md
 docs/pritam_sess_summ.md
 docs/session_summary_v3.md
+notebooks/*
 
 # Models
 models/

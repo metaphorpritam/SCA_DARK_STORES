@@ -228,7 +228,7 @@ def build_vrp_nodes(
 
 
 def derive_stores(stores_path: Path) -> pd.DataFrame:
-    """Load dark_stores_final.csv produced by Sneha's clustering step."""
+    """Load dark_stores_final.csv"""
     stores = pd.read_csv(stores_path)
     # Normalise column names
     if "store_lat" in stores.columns and "lat" not in stores.columns:
@@ -340,7 +340,7 @@ def run(
     # 1. Load
     df = load_master(parquet_path)
 
-    # 2. Dark store locations from Sneha's clustering output
+    # 2. Dark store locations from clustering output
     stores = derive_stores(vrp_dir / "dark_stores_final.csv")
 
     # 3. Build base vrp_nodes
