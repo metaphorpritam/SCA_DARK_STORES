@@ -14,6 +14,7 @@ data/raw/*.csv
 data/raw/*.json
 data/*.parquet
 data/*.csv
+data/*.json
 
 # Numpy/binary artefacts
 *.npy
@@ -24,10 +25,13 @@ data/*.csv
 outputs/*.csv
 outputs/*.json
 outputs/*.html
-outputs/
+outputs/*
 visualisations/
 visualisations/*.html
 visualisations\sp_eda_map.html
+!outputs\final_results.txt
+!outputs/final_results.txt
+
 
 # Jupyter checkpoints
 notebooks/

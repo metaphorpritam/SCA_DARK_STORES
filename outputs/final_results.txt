@@ -1,0 +1,923 @@
+(SCA_DARK_STORES) Z:\PGDBA Content\Projects\Sem 2\SCA\SCA_DARK_STORES>python main.py
+============================================================
+  DARK STORE + INTEGRATED LOGISTICS — PIPELINE
+  Stages (13): data_pipeline → demand_baseline → haversine_matrix → clustering → return_classifier → demand_forecasting → scenario_builder → forward_vrp → reverse_vrp → all_zones_aggregator → joint_optimizer → scenario_analysis → kpi_reporter
+============================================================
+
+────────────────────────────────────────────────────────────
+  STAGE: data_pipeline
+────────────────────────────────────────────────────────────
+============================================================
+  DATA PIPELINE — Olist → master_df.parquet
+============================================================
+
+[1/5] Loading CSVs...
+  [OK]       orders —   99,441 rows  ← olist_orders_dataset.csv
+  [OK]        items —  112,650 rows  ← olist_order_items_dataset.csv
+  [OK]     products —   32,951 rows  ← olist_products_dataset.csv
+  [OK]      sellers —    3,095 rows  ← olist_sellers_dataset.csv
+  [OK]    customers —   99,441 rows  ← olist_customers_dataset.csv
+  [OK]          geo — 1,000,163 rows  ← olist_geolocation_dataset.csv
+  [OK]      reviews —   99,224 rows  ← olist_order_reviews_dataset.csv
+  [OK]     payments —  103,886 rows  ← olist_order_payments_dataset.csv
+  [OK]  translation —       71 rows  ← product_category_name_translation.csv
+
+[2/5] Merging tables...
+
+  Geolocation deduplicated: 1,000,163 → 19,015 zip prefixes
+  Master merged: 99,441 rows × 28 cols
+
+[3/5] Deriving features...
+
+[4/5] Filtering to SP...
+  SP filter: 99,441 → 41,746 rows (42.0%)
+  Dropped 15 rows with missing customer coordinates
+
+[5/5] Saving...
+
+  [SAVED] 41,731 rows → data/master_df.parquet
+
+============================================================
+  MASTER_DF SUMMARY
+============================================================
+  Shape:               41,731 rows × 33 cols
+  Customer state:      ['SP']
+  Unique orders:       41,731
+  Unique customers:    41,731
+  Date range:          2016-09-13 15:24:19 → 2018-10-17 17:30:18
+  Null customer_lat:   0
+  Null seller_lat:     448
+  Lat range:           [-25.0102, -19.9427]
+  Lon range:           [-53.0562, -44.3200]
+  ---
+  Return rate:         2.81%
+    - status-based:    619
+    - late (>7d):      555
+  Avg delivery_days:   8.3
+  Avg days_late:       -11.1
+  Avg order_value:     R$ 141.85
+  Avg product_weight:  2320 g
+  Top 5 categories:
+                    bed_bath_table   4,368
+                     health_beauty   3,761
+                    sports_leisure   3,285
+                        housewares   2,761
+                   furniture_decor   2,694
+  Order statuses:
+               delivered  40,487
+                 shipped     327
+                canceled     327
+             unavailable     292
+                invoiced     160
+              processing     136
+                 created       1
+                approved       1
+============================================================
+
+  ✓ data_pipeline completed in 13.7s
+
+────────────────────────────────────────────────────────────
+  STAGE: demand_baseline
+────────────────────────────────────────────────────────────
+============================================================
+  DAY 2 — DEMAND PROFILE + BASELINE KPIs
+============================================================
+
+[1/5] Loading master_df.parquet...
+  Loaded 41,731 rows
+  Metro filter: 41,731 → 19,207 rows (46.0% of SP state retained)
+
+[2/5] Building demand profile (weekly × zip)...
+  Saved 17,807 rows → data\demand_profile.csv
+  Unique zips: 3,232
+  Week range:  1–52
+
+[3/5] Building zip demand summary...
+  Saved 3,232 zips → data\zip_demand_summary.csv
+  Top 5 zips by order count:
+    ZIP  9820    41 orders  (-23.7410, -46.5550)
+    ZIP  9725    39 orders  (-23.7079, -46.5562)
+    ZIP  9090    38 orders  (-23.6522, -46.5388)
+    ZIP  8290    36 orders  (-23.5537, -46.4507)
+    ZIP  4140    35 orders  (-23.6072, -46.6309)
+
+[4/5] Computing baseline KPIs (naive — no dark stores)...
+  Saved → data\baseline_kpis.csv
+  Key metrics:
+    Mean cust→seller distance: 219.56 km
+    Median cust→seller:        94.33 km
+    P90 cust→seller:           516.98 km
+    Mean delivery days:        7.58
+    % late deliveries:         4.49%
+    Return rate:               2.94%
+    Mean freight:              R$ 16.47
+  Also saved JSON → data\baseline_kpis.json
+
+[5/5] Enriching master_df → v2...
+  Saved 19,207 rows × 35 cols → data\master_df_v2.parquet
+  New columns: demand_per_zip, cust_seller_dist_km
+
+  ✓ demand_baseline completed in 0.8s
+
+────────────────────────────────────────────────────────────
+  STAGE: haversine_matrix
+────────────────────────────────────────────────────────────
+[1/5] Loading data/master_df.parquet …
+      Total rows: 41,731  |  Columns: 33
+[2/5] Filtering to customer_state == 'SP' …
+      SP rows: 41,731
+[3/5] Stratified spatial sample → 500 representative points …
+      Sample shape: (500, 5)  |  Unique zips: 500
+[4/5] Building 500×500 Haversine distance matrix (vectorised) …
+      min=0.05 km  mean=146.24 km  max=745.54 km  ✓
+[5/5] Saving outputs …
+      data/distance_matrix.npy  (1953 KB)
+      data/sp_customer_sample.csv  (500 rows)
+Done.
+
+  ✓ haversine_matrix completed in 1.8s
+
+────────────────────────────────────────────────────────────
+  STAGE: clustering
+────────────────────────────────────────────────────────────
+============================================================
+  CLUSTERING PIPELINE — Dark Store Placement
+============================================================
+
+[1/5] Loading data...
+[load_sp_data] Metro filter: 19,207 → 19,207 rows (100.0% of SP state retained)
+[load_sp_data] 19,207 rows | 3,232 zip codes | demand_per_zip range: 1–41
+
+[2/5] Building zip-level coordinate table...
+[build_zip_level_coords] 3,232 zip codes | demand_weight range: 1–41
+
+[3/5] Running K-Means sweep (K = 3–12)...
+  K= 3  inertia=      122.17  silhouette=0.3688
+  K= 4  inertia=       92.99  silhouette=0.3423
+  K= 5  inertia=       72.38  silhouette=0.3379
+  K= 6  inertia=       59.74  silhouette=0.3378
+  K= 7  inertia=       51.65  silhouette=0.3587
+  K= 8  inertia=       45.32  silhouette=0.3547
+  K= 9  inertia=       40.12  silhouette=0.3355
+  K=10  inertia=       35.83  silhouette=0.3590
+  K=11  inertia=       32.08  silhouette=0.3543
+  K=12  inertia=       29.00  silhouette=0.3455
+
+[4/5] Selecting optimal K by coverage target (≥70% within 5 km)...
+  K= 3  coverage=24.2%
+  K= 4  coverage=29.0%
+  K= 5  coverage=34.8%
+  K= 6  coverage=45.5%
+  K= 7  coverage=51.7%
+  K= 8  coverage=58.2%
+  K= 9  coverage=64.0%
+  K=10  coverage=68.6%
+  K=11  coverage=73.7%
+  K=12  coverage=78.0%
+
+[pick_k_by_coverage] Minimum K hitting 70% target: K=11 (73.7%)
+      Note: silhouette preferred K=3 — overridden by coverage constraint (K=11)
+      Optimal K = 11  (silhouette = 0.3543)
+      Coverage within 5 km: 73.7%
+
+[5/5] Building output tables and saving...
+[save_outputs] dark_store_candidates.csv  (75 rows)
+[save_outputs] coverage_by_k.csv          (10 rows)
+[save_outputs] dark_stores_final.csv      (11 stores)
+[save_outputs] master_df_v2.parquet       (19,207 rows, 36 cols)
+[save_plots] elbow_silhouette.png saved
+[save_plots] kmeans_cluster_map.png saved
+[save_plots] zone_demand_bars.png saved
+
+============================================================
+  PIPELINE COMPLETE
+  Optimal K           : 11
+  Coverage (5 km)     : 73.7%
+  Outputs             : data/
+============================================================
+
+  ✓ clustering completed in 11.4s
+
+────────────────────────────────────────────────────────────
+  STAGE: return_classifier
+────────────────────────────────────────────────────────────
+============================================================
+  RETURN CLASSIFIER PIPELINE
+============================================================
+
+[1/4] Loading data...
+       19,207 rows | positive rate: 2.94%
+
+[2/4] Training XGBoost + Platt calibration...
+[train] Train: 15,365 rows | positives: 452 (2.9%) | scale_pos_weight: 33.0
+[train] Model fitted.
+
+[3/4] Evaluating...
+[evaluate] ROC-AUC : 0.8947  (✓ target met)
+[evaluate] PR-AUC  : 0.4695
+[evaluate] Brier   : 0.0213
+[evaluate] @ threshold 0.3 — precision=0.5128  recall=0.354  f1=0.4188  flagged=2.03% of orders
+
+[4/4] Adding return_prob and saving outputs...
+[add_return_prob] return_prob added | 602 orders flagged for pickup (3.1% at threshold 0.3)
+[run_full_pipeline] master_df_v3.parquet saved (19,207 rows, 38 cols)
+[save_model] Model saved → outputs\return_clf_v1.pkl
+[save_metrics] Metrics saved → outputs\return_classifier_metrics.json
+
+============================================================
+  PIPELINE COMPLETE
+  ROC-AUC  : 0.8947
+  PR-AUC   : 0.4695
+  Outputs  : outputs/
+============================================================
+
+  ✓ return_classifier completed in 3.3s
+
+────────────────────────────────────────────────────────────
+  STAGE: demand_forecasting
+────────────────────────────────────────────────────────────
+============================================================
+ DEMAND FORECASTING
+============================================================
+
+[1/4] Loading data...
+[load_data] Loaded 19,207 rows
+
+[2/4] Preprocessing...
+[preprocess] 11 zones available
+
+[3/4] Aggregating weekly demand...
+[weekly] Generated 956 rows
+
+[4/4] Running forecasting...
+01:01:14 - cmdstanpy - INFO - Chain [1] start processing
+01:01:15 - cmdstanpy - INFO - Chain [1] done processing
+01:01:15 - cmdstanpy - INFO - Chain [1] start processing
+01:01:16 - cmdstanpy - INFO - Chain [1] done processing
+01:01:16 - cmdstanpy - INFO - Chain [1] start processing
+01:01:16 - cmdstanpy - INFO - Chain [1] done processing
+01:01:17 - cmdstanpy - INFO - Chain [1] start processing
+01:01:18 - cmdstanpy - INFO - Chain [1] done processing
+01:01:19 - cmdstanpy - INFO - Chain [1] start processing
+01:01:19 - cmdstanpy - INFO - Chain [1] done processing
+01:01:19 - cmdstanpy - INFO - Chain [1] start processing
+01:01:20 - cmdstanpy - INFO - Chain [1] done processing
+01:01:20 - cmdstanpy - INFO - Chain [1] start processing
+01:01:20 - cmdstanpy - INFO - Chain [1] done processing
+01:01:20 - cmdstanpy - INFO - Chain [1] start processing
+01:01:20 - cmdstanpy - INFO - Chain [1] done processing
+01:01:21 - cmdstanpy - INFO - Chain [1] start processing
+01:01:21 - cmdstanpy - INFO - Chain [1] done processing
+01:01:21 - cmdstanpy - INFO - Chain [1] start processing
+01:01:22 - cmdstanpy - INFO - Chain [1] done processing
+01:01:22 - cmdstanpy - INFO - Chain [1] start processing
+01:01:22 - cmdstanpy - INFO - Chain [1] done processing
+[forecast] Final shape: (1000, 5)
+
+Saving outputs...
+[save] Forecast → outputs\forecasted_demand_by_zone.csv
+[save] Zone totals (outputs) → outputs\zone_total_demand.csv
+[save] Zone totals (data) → data\zone_total_demand.csv
+
+============================================================
+  FORECASTING COMPLETE
+============================================================
+
+  ✓ demand_forecasting completed in 22.3s
+
+────────────────────────────────────────────────────────────
+  STAGE: scenario_builder
+────────────────────────────────────────────────────────────
+
+============================================================
+  SCENARIO BUILDER
+============================================================
+  Note: using 'order_purchase_timestamp' as order_date
+  Loaded master_df_v3: 19,207 rows, 11 zones
+  Loaded dark_stores_final.csv: 11 stores
+
+  Building base vrp_nodes …
+  Saved → data\vrp_nodes.csv
+
+  [vrp_nodes (base)]
+    Zones      : 11
+    Depots     : 11
+    Deliveries : 746
+    Pickups    : 24
+    Total demand (delivery) : 1,454.3 kg
+    Scenario C: 13 additional pickup nodes (threshold 0.15)
+  Saved → data\vrp_nodes_A.csv
+
+  [Scenario A]
+    Zones      : 11
+    Depots     : 11
+    Deliveries : 746
+    Pickups    : 24
+    Total demand (delivery) : 1,454.3 kg
+  Saved → data\vrp_nodes_B.csv
+
+  [Scenario B]
+    Zones      : 11
+    Depots     : 11
+    Deliveries : 970
+    Pickups    : 31
+    Total demand (delivery) : 2,434.7 kg
+  Saved → data\vrp_nodes_C.csv
+
+  [Scenario C]
+    Zones      : 11
+    Depots     : 11
+    Deliveries : 733
+    Pickups    : 37
+    Total demand (delivery) : 1,430.8 kg
+
+  — Sanity checks —
+  ✓ Scenario B: 970 deliveries (2434.7 kg) > Scenario A: 746 deliveries (1454.3 kg)
+  ✓ Scenario C pickups (37) ≥ Scenario A pickups (24)
+  ✓ No single node exceeds vehicle capacity (500 kg)
+  ✓ All 11 zones present in all scenarios
+
+============================================================
+  SCENARIO BUILDER COMPLETE
+  Base  : data/vrp_nodes.csv
+  Scen A: data/vrp_nodes_A.csv
+  Scen B: data/vrp_nodes_B.csv
+  Scen C: data/vrp_nodes_C.csv
+============================================================
+
+
+  ✓ scenario_builder completed in 0.5s
+
+────────────────────────────────────────────────────────────
+  STAGE: forward_vrp
+────────────────────────────────────────────────────────────
+============================================================
+  FORWARD VRP PIPELINE
+============================================================
+
+[1/4] Loading data...
+       19,207 orders | 11 zones
+
+[2/4] Building VRP nodes...
+[build_vrp_nodes] 11 zones
+  Zone  0: 75 customers | demand = 216.4 kg
+  Zone  1: 75 customers | demand = 199.0 kg
+  Zone  2: 75 customers | demand = 115.3 kg
+  Zone  3: 75 customers | demand = 98.9 kg
+  Zone  4: 75 customers | demand = 97.2 kg
+  Zone  5: 75 customers | demand = 193.0 kg
+  Zone  6: 75 customers | demand = 209.8 kg
+  Zone  7: 75 customers | demand = 165.0 kg
+  Zone  8: 75 customers | demand = 190.9 kg
+  Zone  9: 75 customers | demand = 159.1 kg
+  Zone 10: 75 customers | demand = 174.8 kg
+[nodes_to_csv] data\vrp_nodes.csv (836 rows)
+
+[3/4] Solving CVRPTW (30s per zone)...
+  Zone  0: 2 vehicles | 95.2 km | R$243
+  Zone  1: 2 vehicles | 81.5 km | R$222
+  Zone  2: 1 vehicles | 109.7 km | R$215
+  Zone  3: 1 vehicles | 99.4 km | R$199
+  Zone  4: 3 vehicles | 88.6 km | R$283
+  Zone  5: 1 vehicles | 112.9 km | R$219
+  Zone  6: 2 vehicles | 97.3 km | R$246
+  Zone  7: 2 vehicles | 103.0 km | R$255
+  Zone  8: 2 vehicles | 117.3 km | R$276
+  Zone  9: 2 vehicles | 92.4 km | R$239
+  Zone 10: 2 vehicles | 83.2 km | R$225
+
+       11/11 zones solved
+
+[4/4] Saving outputs...
+[compute_naive_baseline] baseline_kpis_naive.csv saved
+  Customers      : 19,000
+  Avg naive dist : 219.56 km (median: 94.33 km)
+  Naive cost     : R$7,207,417
+[save_routes] forward_routes.csv     (845 rows)
+[save_routes] forward_routes.json    (11 zones)
+[save_routes] forward_kpi_summary.csv (11 zones)
+[compute_kpi_by_zone] forward_kpi_by_zone.csv saved (20 rows)
+  Bottleneck: Zone 4 vehicle 3 — R$5.81/stop
+
+============================================================
+  FORWARD VRP COMPLETE
+  Zones solved  : 11/11
+  Total dist    : 1080.5 km
+  Total cost    : R$2621
+  Total vehicles: 20
+============================================================
+
+  ✓ forward_vrp completed in 330.5s
+
+────────────────────────────────────────────────────────────
+  STAGE: reverse_vrp
+────────────────────────────────────────────────────────────
+============================================================
+  REVERSE VRP PIPELINE
+============================================================
+
+[1/4] Loading data...
+       19,207 orders | 602 returns | 11 zones
+
+[2/4] Building reverse VRP nodes...
+[build_reverse_vrp_nodes] 11 zones
+  Zone  0: 50 pickups | weight = 156.8 kg
+  Zone  1: 75 pickups | weight = 204.7 kg
+  Zone  2: 59 pickups | weight = 97.9 kg
+  Zone  3: 35 pickups | weight = 80.5 kg
+  Zone  4: 45 pickups | weight = 166.7 kg
+  Zone  5: 43 pickups | weight = 97.4 kg
+  Zone  6: 46 pickups | weight = 100.0 kg
+  Zone  7: 53 pickups | weight = 127.7 kg
+  Zone  8: 46 pickups | weight = 76.0 kg
+  Zone  9: 58 pickups | weight = 85.9 kg
+  Zone 10: 72 pickups | weight = 178.2 kg
+[nodes_to_csv] data\reverse_vrp_nodes.csv (593 rows)
+
+[3/4] Solving reverse CVRPTW (30s per zone)...
+       Strategy: PATH_CHEAPEST_ARC + SIMULATED_ANNEALING
+  Zone  0: 1 vehicles | 88.2 km | R$182
+  Zone  1: 2 vehicles | 81.8 km | R$223
+  Zone  2: 2 vehicles | 108.6 km | R$263
+  Zone  3: 2 vehicles | 59.3 km | R$189
+  Zone  4: 2 vehicles | 83.5 km | R$225
+  Zone  5: 1 vehicles | 93.7 km | R$191
+  Zone  6: 1 vehicles | 82.3 km | R$173
+  Zone  7: 1 vehicles | 76.1 km | R$164
+  Zone  8: 2 vehicles | 100.1 km | R$250
+  Zone  9: 1 vehicles | 86.2 km | R$179
+  Zone 10: 1 vehicles | 86.8 km | R$180
+
+       11/11 zones solved
+
+[4/4] Saving outputs...
+[save_routes] reverse_routes.csv     (598 rows)
+[save_routes] reverse_routes.json    (11 zones)
+[save_routes] reverse_kpi_summary.csv (11 zones)
+[compute_all_zones_summary] all_zones_reverse_results.csv saved (11 rows)
+
+============================================================
+  REVERSE VRP COMPLETE
+  Zones solved  : 11/11
+  Total dist    : 946.6 km
+  Total cost    : R$2220
+  Total vehicles: 16
+============================================================
+
+  ✓ reverse_vrp completed in 330.2s
+
+────────────────────────────────────────────────────────────
+  STAGE: all_zones_aggregator
+────────────────────────────────────────────────────────────
+
+============================================================
+  ALL-ZONES JOINT AGGREGATOR
+============================================================
+  Loaded forward KPIs: 20 rows from forward_kpi_by_zone.csv
+  Forward columns: ['zone_id', 'vehicle_id', 'total_distance_km', 'num_stops', 'routing_cost_R$', 'cost_per_stop']
+  Aggregated to 11 zones (grouped by zone_id)
+  Loaded reverse KPIs: 11 zones from reverse_kpi_summary.csv
+  Reverse columns: ['zone_id', 'n_pickups', 'n_vehicles_used', 'total_dist_km', 'routing_cost_R$', 'max_route_km', 'min_route_km']      
+
+  Aggregating forward + reverse KPIs …
+  Saved → outputs\all_zones_summary.csv  (11 zones, 17 columns)
+
+  ── Joint Totals (all zones) ──────────────────────────
+    Zones              : 11
+    Total fleet size   : 36 vehicles
+    Total distance     : 2,027.2 km  (fwd + rev)
+    Total cost         : R$ 4,840.71  (fwd + rev)
+    Total deliveries   : 825
+
+  ── Hardest Zone ──────────────────────────────────────
+    Zone ID            : 4
+    Cost per delivery  : R$ 3.7713
+    Total cost         : R$ 508.04
+    Deliveries         : 75
+    → Flag this zone for scheduling review / extra vehicle allocation
+
+  ── Sanity checks ─────────────────────────────────────
+  ✓ Exactly 1 hardest zone flagged
+  ✓ Joint cost ≥ both forward and reverse costs
+  ✓ Joint distance ≥ forward distance
+  ✓ All zones have fleet_size > 0
+  ✓ No NaN values in key columns
+
+============================================================
+  OUTPUT: outputs\all_zones_summary.csv
+============================================================
+
+
+  ✓ all_zones_aggregator completed in 0.1s
+
+────────────────────────────────────────────────────────────
+  STAGE: joint_optimizer
+────────────────────────────────────────────────────────────
+[build_vrp_nodes] 11 zones
+  Zone  0: 75 customers | demand = 216.4 kg
+  Zone  1: 75 customers | demand = 199.0 kg
+  Zone  2: 75 customers | demand = 115.3 kg
+  Zone  3: 75 customers | demand = 98.9 kg
+  Zone  4: 75 customers | demand = 97.2 kg
+  Zone  5: 75 customers | demand = 193.0 kg
+  Zone  6: 75 customers | demand = 209.8 kg
+  Zone  7: 75 customers | demand = 165.0 kg
+  Zone  8: 75 customers | demand = 190.9 kg
+  Zone  9: 75 customers | demand = 159.1 kg
+  Zone 10: 75 customers | demand = 174.8 kg
+[build_reverse_vrp_nodes] 11 zones
+  Zone  0: 50 pickups | weight = 156.8 kg
+  Zone  1: 75 pickups | weight = 204.7 kg
+  Zone  2: 59 pickups | weight = 97.9 kg
+  Zone  3: 35 pickups | weight = 80.5 kg
+  Zone  4: 45 pickups | weight = 166.7 kg
+  Zone  5: 43 pickups | weight = 97.4 kg
+  Zone  6: 46 pickups | weight = 100.0 kg
+  Zone  7: 53 pickups | weight = 127.7 kg
+  Zone  8: 46 pickups | weight = 76.0 kg
+  Zone  9: 58 pickups | weight = 85.9 kg
+  Zone 10: 72 pickups | weight = 178.2 kg
+[SDVRP-all] Running 11 zones: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+[SDVRP] Zone 0: 2 vehicles | 132.49 km | R$298.74  vs R$425.24 separate → 29.7% saving
+[SDVRP] Zone 1: 2 vehicles | 128.50 km | R$292.75  vs R$444.99 separate → 34.2% saving
+[SDVRP] Zone 2: 2 vehicles | 148.97 km | R$323.46  vs R$477.38 separate → 32.2% saving
+[SDVRP] Zone 3: 2 vehicles | 114.39 km | R$271.59  vs R$388.02 separate → 30.0% saving
+[SDVRP] Zone 4: 3 vehicles | 116.29 km | R$324.44  vs R$508.05 separate → 36.1% saving
+[SDVRP] Zone 5: 2 vehicles | 132.71 km | R$299.06  vs R$409.92 separate → 27.0% saving
+[SDVRP] Zone 6: 2 vehicles | 128.70 km | R$293.06  vs R$419.40 separate → 30.1% saving
+[SDVRP] Zone 7: 2 vehicles | 133.08 km | R$299.61  vs R$418.72 separate → 28.4% saving
+[SDVRP] Zone 8: 2 vehicles | 152.29 km | R$328.43  vs R$526.07 separate → 37.6% saving
+[SDVRP] Zone 9: 2 vehicles | 129.31 km | R$293.96  vs R$417.86 separate → 29.7% saving
+[SDVRP] Zone 10: 2 vehicles | 118.69 km | R$278.03  vs R$405.10 separate → 31.4% saving
+[SDVRP-all] hybrid_routes.json → outputs\hybrid_routes.json  (11 zones)
+[SDVRP-all] hybrid_kpi_summary.csv → outputs\hybrid_kpi_summary.csv
+[SDVRP-all] Total fleet saving vs separate: R$1537.62
+Welcome to the CBC MILP Solver 
+Version: 2.10.3
+Build Date: Dec 15 2019
+
+command line - Z:\PGDBA Content\Projects\Sem 2\SCA\SCA_DARK_STORES\.venv\Lib\site-packages\pulp\apis\../solverdir/cbc/win/i64/cbc.exe C:\Users\asus\AppData\Local\Temp\2d91f872e8f24df790ff50a73e69b7b5-pulp.mps -sec 60 -timeMode elapsed -branch -printingOptions all -solution C:\Users\asus\AppData\Local\Temp\2d91f872e8f24df790ff50a73e69b7b5-pulp.sol (default strategy 1)
+At line 2 NAME          MODEL
+At line 3 ROWS
+At line 7 COLUMNS
+At line 152 RHS
+At line 155 BOUNDS
+At line 192 ENDATA
+Problem MODEL has 2 rows, 36 columns and 36 elements
+Coin0008I MODEL read with 0 errors
+seconds was changed from 1e+100 to 60
+Option for timeMode changed from cpu to elapsed
+Continuous objective value is 104.119 - 0.00 seconds
+Cgl0004I processed model has 2 rows, 36 columns (36 integer (36 of which binary)) and 36 elements
+Cbc0038I Initial state - 0 integers unsatisfied sum - 0
+Cbc0038I Solution found of 104.119
+Cbc0038I Before mini branch and bound, 36 integers at bound fixed and 0 continuous
+Cbc0038I Mini branch and bound did not improve solution (0.00 seconds)
+Cbc0038I After 0.00 seconds - Feasibility pump exiting with objective of 104.119 - took 0.00 seconds
+Cbc0012I Integer solution of 104.11875 found by feasibility pump after 0 iterations and 0 nodes (0.00 seconds)
+Cbc0001I Search completed - best objective 104.11875404663, took 0 iterations and 0 nodes (0.00 seconds)
+Cbc0035I Maximum depth 0, 0 variables fixed on reduced cost
+Cuts at root node changed objective from 104.119 to 104.119
+Probing was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Gomory was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Knapsack was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Clique was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+MixedIntegerRounding2 was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+FlowCover was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+TwoMirCuts was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+ZeroHalf was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+
+Result - Optimal solution found
+
+Objective value:                104.11875405
+Enumerated nodes:               0
+Total iterations:               0
+Time (CPU seconds):             0.01
+Time (Wallclock seconds):       0.01
+
+Option for printingOptions changed from normal to all
+Total time (CPU seconds):       0.01   (Wallclock seconds):       0.01
+
+[INFO] Joint optimiser result → outputs/joint_optimizer_result.json
+       Status=Optimal  Z=697.47  Nveh=2
+[Pareto] ε-constraint enumeration: 20 fwd × 16 rev = 320 combinations
+[Pareto] Knee: k_fwd=1 k_rev=13  RoutingCost=R$1730.63  T_pen=111.253
+[Pareto] 16 Pareto-optimal solutions out of 320 total
+[Pareto] Saved → outputs/pareto_results.csv
+[Pareto] Plot saved → outputs/pareto_tradeoff.png
+
+  ✓ joint_optimizer completed in 330.9s
+
+────────────────────────────────────────────────────────────
+  STAGE: scenario_analysis
+────────────────────────────────────────────────────────────
+
+============================================================
+  SCENARIO A — vrp_nodes_A.csv
+============================================================
+
+[1/3] Forward VRP (11 zones)...
+  Zone  0: 1 vehicles | 106.4 km | R$210
+  Zone  1: 1 vehicles | 76.8 km | R$165
+  Zone  2: 2 vehicles | 99.4 km | R$249
+  Zone  3: 1 vehicles | 85.1 km | R$178
+  Zone  4: 2 vehicles | 113.9 km | R$271
+  Zone  5: 2 vehicles | 97.4 km | R$246
+  Zone  6: 1 vehicles | 98.6 km | R$198
+  Zone  7: 2 vehicles | 78.7 km | R$218
+  Zone  8: 1 vehicles | 96.8 km | R$195
+  Zone  9: 1 vehicles | 94.2 km | R$191
+  Zone 10: 1 vehicles | 85.2 km | R$178
+  11/11 zones solved
+
+[2/3] Reverse VRP (11 zones)...
+  Zone  2: 1 vehicles | 14.5 km | R$72
+  Zone  3: 1 vehicles | 6.8 km | R$60
+  Zone  4: 1 vehicles | 10.1 km | R$65
+  Zone  5: 1 vehicles | 26.6 km | R$90
+  Zone  7: 1 vehicles | 22.7 km | R$84
+  Zone  8: 1 vehicles | 27.1 km | R$91
+  Zone  9: 1 vehicles | 12.2 km | R$68
+  Zone 10: 1 vehicles | 9.6 km | R$64
+  8/11 zones solved
+
+[3/3] Joint optimizer...
+Welcome to the CBC MILP Solver 
+Version: 2.10.3
+Build Date: Dec 15 2019
+
+command line - Z:\PGDBA Content\Projects\Sem 2\SCA\SCA_DARK_STORES\.venv\Lib\site-packages\pulp\apis\../solverdir/cbc/win/i64/cbc.exe C:\Users\asus\AppData\Local\Temp\c2b7770d107a48919cda7f2f3b447bab-pulp.mps -sec 60 -timeMode elapsed -branch -printingOptions all -solution C:\Users\asus\AppData\Local\Temp\c2b7770d107a48919cda7f2f3b447bab-pulp.sol (default strategy 1)
+At line 2 NAME          MODEL
+At line 3 ROWS
+At line 7 COLUMNS
+At line 100 RHS
+At line 103 BOUNDS
+At line 127 ENDATA
+Problem MODEL has 2 rows, 23 columns and 23 elements
+Coin0008I MODEL read with 0 errors
+seconds was changed from 1e+100 to 60
+Option for timeMode changed from cpu to elapsed
+Continuous objective value is 148.299 - 0.00 seconds
+Cgl0004I processed model has 2 rows, 23 columns (23 integer (23 of which binary)) and 23 elements
+Cbc0038I Initial state - 0 integers unsatisfied sum - 0
+Cbc0038I Solution found of 148.299
+Cbc0038I Before mini branch and bound, 23 integers at bound fixed and 0 continuous
+Cbc0038I Mini branch and bound did not improve solution (0.00 seconds)
+Cbc0038I After 0.00 seconds - Feasibility pump exiting with objective of 148.299 - took 0.00 seconds
+Cbc0012I Integer solution of 148.29875 found by feasibility pump after 0 iterations and 0 nodes (0.00 seconds)
+Cbc0001I Search completed - best objective 148.29875, took 0 iterations and 0 nodes (0.00 seconds)
+Cbc0035I Maximum depth 0, 0 variables fixed on reduced cost
+Cuts at root node changed objective from 148.299 to 148.299
+Probing was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Gomory was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Knapsack was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Clique was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+MixedIntegerRounding2 was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+FlowCover was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+TwoMirCuts was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+ZeroHalf was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+
+Result - Optimal solution found
+
+Objective value:                148.29875000
+Enumerated nodes:               0
+Total iterations:               0
+Time (CPU seconds):             0.01
+Time (Wallclock seconds):       0.01
+
+Option for printingOptions changed from normal to all
+Total time (CPU seconds):       0.02   (Wallclock seconds):       0.02
+
+[INFO] Joint optimiser result → outputs\joint_result_scenario_A.json
+       Status=Optimal  Z=170.235  Nveh=2
+
+  [A] Cost=R$2893 | Dist=1162.0km | Coverage=76.7% | ReturnEff=72.7% | Vehicles=23 | Infeasible=0
+
+============================================================
+  SCENARIO B — vrp_nodes_B.csv
+============================================================
+
+[1/3] Forward VRP (11 zones)...
+  Zone  0: 3 vehicles | 121.7 km | R$333
+  Zone  1: 2 vehicles | 86.2 km | R$229
+  Zone  2: 2 vehicles | 108.2 km | R$262
+  Zone  3: 1 vehicles | 104.8 km | R$207
+  Zone  4: 2 vehicles | 136.5 km | R$305
+  Zone  5: 2 vehicles | 111.9 km | R$268
+  Zone  6: 3 vehicles | 108.2 km | R$312
+  Zone  7: 2 vehicles | 94.7 km | R$242
+  Zone  8: 2 vehicles | 107.2 km | R$261
+  Zone  9: 2 vehicles | 104.6 km | R$257
+  Zone 10: 2 vehicles | 95.4 km | R$243
+  11/11 zones solved
+
+[2/3] Reverse VRP (11 zones)...
+  Zone  1: 1 vehicles | 8.5 km | R$63
+  Zone  2: 1 vehicles | 14.5 km | R$72
+  Zone  3: 1 vehicles | 15.1 km | R$73
+  Zone  4: 1 vehicles | 10.1 km | R$65
+  Zone  5: 1 vehicles | 26.8 km | R$90
+  Zone  7: 1 vehicles | 22.7 km | R$84
+  Zone  8: 1 vehicles | 30.9 km | R$96
+  Zone  9: 1 vehicles | 12.2 km | R$68
+  Zone 10: 1 vehicles | 9.6 km | R$64
+  9/11 zones solved
+
+[3/3] Joint optimizer...
+Welcome to the CBC MILP Solver 
+Version: 2.10.3
+Build Date: Dec 15 2019
+
+command line - Z:\PGDBA Content\Projects\Sem 2\SCA\SCA_DARK_STORES\.venv\Lib\site-packages\pulp\apis\../solverdir/cbc/win/i64/cbc.exe C:\Users\asus\AppData\Local\Temp\fc5d992bee984480aaccd30bfdb43fbd-pulp.mps -sec 60 -timeMode elapsed -branch -printingOptions all -solution C:\Users\asus\AppData\Local\Temp\fc5d992bee984480aaccd30bfdb43fbd-pulp.sol (default strategy 1)
+At line 2 NAME          MODEL
+At line 3 ROWS
+At line 7 COLUMNS
+At line 136 RHS
+At line 139 BOUNDS
+At line 172 ENDATA
+Problem MODEL has 2 rows, 32 columns and 32 elements
+Coin0008I MODEL read with 0 errors
+seconds was changed from 1e+100 to 60
+Option for timeMode changed from cpu to elapsed
+Continuous objective value is 147.169 - 0.00 seconds
+Cgl0004I processed model has 2 rows, 32 columns (32 integer (32 of which binary)) and 32 elements
+Cbc0038I Initial state - 0 integers unsatisfied sum - 0
+Cbc0038I Solution found of 147.169
+Cbc0038I Before mini branch and bound, 32 integers at bound fixed and 0 continuous
+Cbc0038I Mini branch and bound did not improve solution (0.00 seconds)
+Cbc0038I After 0.00 seconds - Feasibility pump exiting with objective of 147.169 - took 0.00 seconds
+Cbc0012I Integer solution of 147.1686 found by feasibility pump after 0 iterations and 0 nodes (0.00 seconds)
+Cbc0001I Search completed - best objective 147.1686, took 0 iterations and 0 nodes (0.00 seconds)
+Cbc0035I Maximum depth 0, 0 variables fixed on reduced cost
+Cuts at root node changed objective from 147.169 to 147.169
+Probing was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Gomory was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Knapsack was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Clique was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+MixedIntegerRounding2 was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+FlowCover was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+TwoMirCuts was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+ZeroHalf was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+
+Result - Optimal solution found
+
+Objective value:                147.16860000
+Enumerated nodes:               0
+Total iterations:               0
+Time (CPU seconds):             0.01
+Time (Wallclock seconds):       0.00
+
+Option for printingOptions changed from normal to all
+Total time (CPU seconds):       0.02   (Wallclock seconds):       0.02
+
+[INFO] Joint optimiser result → outputs\joint_result_scenario_B.json
+       Status=Optimal  Z=176.014  Nveh=2
+
+  [B] Cost=R$3595 | Dist=1329.7km | Coverage=76.5% | ReturnEff=81.8% | Vehicles=32 | Infeasible=0
+
+============================================================
+  SCENARIO C — vrp_nodes_C.csv
+============================================================
+
+[1/3] Forward VRP (11 zones)...
+  Zone  0: 1 vehicles | 106.4 km | R$210
+  Zone  1: 1 vehicles | 76.3 km | R$164
+  Zone  2: 2 vehicles | 99.4 km | R$249
+  Zone  3: 2 vehicles | 81.9 km | R$223
+  Zone  4: 2 vehicles | 113.9 km | R$271
+  Zone  5: 2 vehicles | 96.6 km | R$245
+  Zone  6: 1 vehicles | 96.5 km | R$195
+  Zone  7: 2 vehicles | 78.5 km | R$218
+  Zone  8: 1 vehicles | 95.5 km | R$193
+  Zone  9: 1 vehicles | 94.2 km | R$191
+  Zone 10: 1 vehicles | 85.2 km | R$178
+  11/11 zones solved
+
+[2/3] Reverse VRP (11 zones)...
+  Zone  0: 1 vehicles | 9.8 km | R$65
+  Zone  1: 1 vehicles | 14.3 km | R$71
+  Zone  2: 1 vehicles | 18.2 km | R$77
+  Zone  3: 1 vehicles | 18.2 km | R$77
+  Zone  4: 1 vehicles | 10.1 km | R$65
+  Zone  5: 1 vehicles | 30.9 km | R$96
+  Zone  6: 1 vehicles | 17.1 km | R$76
+  Zone  7: 1 vehicles | 24.8 km | R$87
+  Zone  8: 1 vehicles | 27.6 km | R$91
+  Zone  9: 1 vehicles | 12.2 km | R$68
+  Zone 10: 1 vehicles | 9.6 km | R$64
+  11/11 zones solved
+
+[3/3] Joint optimizer...
+Welcome to the CBC MILP Solver 
+Version: 2.10.3
+Build Date: Dec 15 2019
+
+command line - Z:\PGDBA Content\Projects\Sem 2\SCA\SCA_DARK_STORES\.venv\Lib\site-packages\pulp\apis\../solverdir/cbc/win/i64/cbc.exe C:\Users\asus\AppData\Local\Temp\c886e618a8c4463f99facdf458955198-pulp.mps -sec 60 -timeMode elapsed -branch -printingOptions all -solution C:\Users\asus\AppData\Local\Temp\c886e618a8c4463f99facdf458955198-pulp.sol (default strategy 1)
+At line 2 NAME          MODEL
+At line 3 ROWS
+At line 7 COLUMNS
+At line 116 RHS
+At line 119 BOUNDS
+At line 147 ENDATA
+Problem MODEL has 2 rows, 27 columns and 27 elements
+Coin0008I MODEL read with 0 errors
+seconds was changed from 1e+100 to 60
+Option for timeMode changed from cpu to elapsed
+Continuous objective value is 124.706 - 0.00 seconds
+Cgl0004I processed model has 2 rows, 27 columns (27 integer (27 of which binary)) and 27 elements
+Cbc0038I Initial state - 0 integers unsatisfied sum - 0
+Cbc0038I Solution found of 124.706
+Cbc0038I Before mini branch and bound, 27 integers at bound fixed and 0 continuous
+Cbc0038I Mini branch and bound did not improve solution (0.01 seconds)
+Cbc0038I After 0.01 seconds - Feasibility pump exiting with objective of 124.706 - took 0.00 seconds
+Cbc0012I Integer solution of 124.70556 found by feasibility pump after 0 iterations and 0 nodes (0.01 seconds)
+Cbc0001I Search completed - best objective 124.70556363636, took 0 iterations and 0 nodes (0.01 seconds)
+Cbc0035I Maximum depth 0, 0 variables fixed on reduced cost
+Cuts at root node changed objective from 124.706 to 124.706
+Probing was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Gomory was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Knapsack was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+Clique was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+MixedIntegerRounding2 was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+FlowCover was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+TwoMirCuts was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+ZeroHalf was tried 0 times and created 0 cuts of which 0 were active after adding rounds of cuts (0.000 seconds)
+
+Result - Optimal solution found
+
+Objective value:                124.70556364
+Enumerated nodes:               0
+Total iterations:               0
+Time (CPU seconds):             0.01
+Time (Wallclock seconds):       0.01
+
+Option for printingOptions changed from normal to all
+Total time (CPU seconds):       0.02   (Wallclock seconds):       0.02
+
+[INFO] Joint optimiser result → outputs\joint_result_scenario_C.json
+       Status=Optimal  Z=152.208  Nveh=2
+
+  [C] Cost=R$3176 | Dist=1217.3km | Coverage=76.3% | ReturnEff=100.0% | Vehicles=27 | Infeasible=0
+
+[scenario_analysis] scenario_results_table.csv saved → outputs\scenario_results_table.csv
+[scenario_analysis] Scenario B: all zones feasible under +30% surge ✓
+[scenario_analysis] Scenario C: reverse cost +41.2% vs base (R$+244.96) → outputs\scenario_C_reverse_delta.csv
+
+============================================================
+  SCENARIO ANALYSIS COMPLETE
+============================================================
+scenario  total_routing_cost_R$  total_distance_km  avg_delivery_time_min  coverage_pct  return_efficiency_pct  n_vehicles
+       A                2893.08            1162.05                  140.8          76.7                   72.7          23
+       B                3594.54            1329.69                  160.8          76.5                   81.8          32
+       C                3176.02            1217.35                  139.7          76.3                  100.0          27
+
+  Outputs:
+    outputs\scenario_results_table.csv
+    outputs/scenario_B_infeasible.csv
+    outputs/scenario_C_reverse_delta.csv
+
+  ✓ scenario_analysis completed in 1831.1s
+
+────────────────────────────────────────────────────────────
+  STAGE: kpi_reporter
+────────────────────────────────────────────────────────────
+[kpi_reporter] Forward KPI loaded: 11 zones  (forward_kpi_summary.csv)
+[kpi_reporter] Reverse KPI loaded: 11 zones  (reverse_kpi_summary.csv)
+[kpi_reporter] Hybrid KPI loaded: 11 zones  (hybrid_kpi_summary.csv)
+[kpi_reporter] Priority ranking by actual saving_R$ (SDVRP solved)
+[kpi_reporter] Saved → outputs/combined_kpi_report.csv  (11 zones, 23 cols)
+
+============================================================
+  COMBINED KPI REPORT SUMMARY
+============================================================
+  Zones            : 11
+  Forward cost     : R$ 2,620.81  (1,080.52 km)
+  Reverse cost     : R$ 2,219.94  (946.64 km)
+  Separate total   : R$ 4,840.75
+
+  SDVRP hybrid saving : R$ 1,537.62  (avg 31.5%)
+  Post-SDVRP total    : R$ 3,303.13
+
+   Zone     FwdCost     RevCost     SepCost     HybCost   Saving%   Rank
+  -----  ----------  ----------  ----------  ----------  --------  -----
+      0  R$  242.88  R$  182.36  R$  425.24  R$  298.74     29.7%      6
+      1  R$  222.31  R$  222.68  R$  444.99  R$  292.75     34.2%      4
+      2  R$  214.54  R$  262.84  R$  477.38  R$  323.46     32.2%      3
+      3  R$  199.06  R$  188.96  R$  388.02  R$  271.59     30.0%     10
+      4  R$  282.86  R$  225.19  R$  508.05  R$  324.44     36.1%      2
+      5  R$  219.34  R$  190.58  R$  409.92  R$  299.06     27.0%     11
+      6  R$  246.00  R$  173.40  R$  419.40  R$  293.06     30.1%      7
+      7  R$  254.52  R$  164.20  R$  418.72  R$  299.61     28.4%      9
+      8  R$  275.89  R$  250.18  R$  526.07  R$  328.43     37.6%      1
+      9  R$  238.58  R$  179.28  R$  417.86  R$  293.96     29.7%      8
+     10  R$  224.83  R$  180.27  R$  405.10  R$  278.03     31.4%      5
+============================================================
+
+
+  ✓ kpi_reporter completed in 0.0s
+
+============================================================
+  PIPELINE COMPLETE — 13 stages in 2876.6s
+  Outputs : outputs/
+  Data    : data/
+============================================================
