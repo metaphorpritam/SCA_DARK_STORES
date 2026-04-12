@@ -1,44 +1,46 @@
-import folium
-import os
-
-# 1. Ensure the outputs folder exists
-if not os.path.exists("outputs"):
-    os.makedirs("outputs")
-
-# 2. Centering the map on São Paulo (Target Region)
-# Coordinates: -23.5505, -46.6333
-sp_map = folium.Map(
-    location=[-23.5505, -46.6333], zoom_start=11, tiles="cartodbpositron"
-)
-
-# 3. Save the map
-sp_map.save("outputs/base_map.html")
-
-print("Success! Base map saved in 'outputs/base_map.html'")
-
 import pandas as pd
 import folium
+from folium.plugins import HeatMap
 
-# Load data
+# -----------------------------
+# LOAD DATA
+# -----------------------------
 customers = pd.read_parquet("data/master_df_v2.parquet")
 centroids = pd.read_csv("data/dark_store_candidates.csv")
 
-# Map
+# Clean customer coordinates
+customers = customers[["customer_lat", "customer_lon"]].dropna()
+
+# -----------------------------
+# CREATE MAP
+# -----------------------------
 m = folium.Map(
     location=[customers["customer_lat"].mean(), customers["customer_lon"].mean()],
     zoom_start=10,
 )
 
-# Customers (sample)
-for _, row in customers.sample(1000).iterrows():
+# -----------------------------
+# ADD HEATMAP (Demand Density)
+# -----------------------------
+heat_data = customers[["customer_lat", "customer_lon"]].values.tolist()
+
+HeatMap(heat_data, radius=8, blur=12, min_opacity=0.3).add_to(m)
+
+# -----------------------------
+# ADD CUSTOMER POINTS (sample for speed)
+# -----------------------------
+for _, row in customers.sample(1000, random_state=42).iterrows():
     folium.CircleMarker(
         location=[row["customer_lat"], row["customer_lon"]],
         radius=2,
         color="blue",
         fill=True,
+        fill_opacity=0.6,
     ).add_to(m)
 
-# Dark Stores (IMPORTANT)
+# -----------------------------
+# ADD DARK STORE MARKERS
+# -----------------------------
 for _, row in centroids.iterrows():
     folium.Marker(
         location=[row["lat"], row["lon"]],
@@ -46,7 +48,33 @@ for _, row in centroids.iterrows():
         popup="Dark Store",
     ).add_to(m)
 
-# Save updated map
+# -----------------------------
+# ADD LEGEND (IMPORTANT)
+# -----------------------------
+legend_html = """
+<div style="
+position: fixed; 
+bottom: 50px; left: 50px; width: 220px; height: 120px; 
+background-color: white; z-index:9999; font-size:14px;
+border:2px solid grey; padding: 10px;
+">
+<b>Legend</b><br>
+<span style="color:red;">★</span> Dark Store<br>
+<span style="color:blue;">●</span> Customer Location<br>
+Heatmap → Demand Density
+</div>
+"""
+
+m.get_root().html.add_child(folium.Element(legend_html))
+
+# -----------------------------
+# ADD LAYER CONTROL (optional but good)
+# -----------------------------
+folium.LayerControl().add_to(m)
+
+# -----------------------------
+# SAVE MAP
+# -----------------------------
 m.save("outputs/dark_store_map.html")
 
-print("✅ dark_store_map.html created")
+print("✅ dark_store_map.html created successfully!")
