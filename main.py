@@ -135,7 +135,7 @@ def run_reverse_vrp():
 
 
 def run_all_zones_aggregator():
-    from all_zones_aggregator import run
+    from src.all_zones_aggregator import run
 
     run(
         fwd_path="outputs/forward_kpi_by_zone.csv",
@@ -151,7 +151,7 @@ def run_joint_optimizer():
     """
     import pandas as pd
     from src.joint_optimizer import run_all_zones_sdvrp
-    from src.route_parser import build_vrp_nodes, build_reverse_vrp_nodes
+    from src.route_parser import build_vrp_nodes, build_reverse_vrp_nodes, NUM_VEHICLES
 
     master = pd.read_parquet("data/master_df_v3.parquet")
     dark_stores = pd.read_csv("data/dark_stores_final.csv")
@@ -168,7 +168,7 @@ def run_joint_optimizer():
         rev_zones=rev_zones,
         fwd_kpi_df=fwd_kpi,
         rev_kpi_df=rev_kpi,
-        num_vehicles=10,
+        num_vehicles=NUM_VEHICLES,
         output_dir="outputs",
     )
 
