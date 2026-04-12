@@ -30,10 +30,14 @@ visualisations/*.html
 visualisations\sp_eda_map.html
 
 # Jupyter checkpoints
+notebooks/
 .ipynb_checkpoints/
 
 # Private session/experimental notebooks — not for main repo
 notebooks/pritam_temp_notebooks/
+docs/architecture.md
+docs/pritam_sess_summ.md
+docs/session_summary_v3.md
 
 # Models
 models/
@@ -49,3 +53,4 @@ report/*.aux
 report/*.log
 report/*.out
 report/*.toc
+
