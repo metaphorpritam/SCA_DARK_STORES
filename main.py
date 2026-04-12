@@ -13,7 +13,11 @@ Stage execution order (dependency-driven):
     Stage 8:  reverse_vrp          → outputs/reverse_routes.json + reverse_kpi_summary.csv
     Stage 9:  all_zones_aggregator → outputs/all_zones_summary.csv  [needs fwd + rev KPIs]
     Stage 10: joint_optimizer      → outputs/hybrid_routes.json + hybrid_kpi_summary.csv
-    Stage 11: scenario_analysis    → outputs/scenario_results_table.csv 
+                                     outputs/joint_optimizer_result.json
+                                     outputs/pareto_results.csv + pareto_tradeoff.png
+    Stage 11: scenario_analysis    → outputs/scenario_results_table.csv
+    Stage 12: kpi_reporter         → outputs/combined_kpi_report.csv
+
 Usage:
     python main.py                              # run all stages
     python main.py --from clustering            # resume from a specific stage
@@ -26,6 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import pandas as pd
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -33,18 +38,19 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 STAGES = [
-    "data_pipeline",  # 0 — Olist CSVs → master_df.parquet
-    "demand_baseline",  # 1 — demand profile + baseline KPIs + master_df_v2
-    "haversine_matrix",  # 2 — 500×500 distance matrix
-    "clustering",  # 3 — K-Means + p-Median → dark_stores_final + dark_store_id
-    "return_classifier",  # 4 — XGBoost → return_prob → master_df_v3
-    "demand_forecasting",  # 5 — Prophet per zone → forecasted_demand_by_zone.csv
-    "scenario_builder",  # 6 — vrp_nodes.csv + scenario A/B/C variants
-    "forward_vrp",  # 7 — OR-Tools CVRPTW → forward_routes + KPIs
-    "reverse_vrp",  # 8 — OR-Tools CVRPTW → reverse_routes + KPIs
-    "all_zones_aggregator",  # 9 — merge fwd + rev KPIs → all_zones_summary.csv
-    "joint_optimizer",  # 10 — SDVRP hybrid + Pareto sweep
+    "data_pipeline",  # 0  — Olist CSVs → master_df.parquet
+    "demand_baseline",  # 1  — demand profile + baseline KPIs + master_df_v2
+    "haversine_matrix",  # 2  — 500×500 distance matrix
+    "clustering",  # 3  — K-Means + p-Median → dark_stores_final + dark_store_id
+    "return_classifier",  # 4  — XGBoost → return_prob → master_df_v3
+    "demand_forecasting",  # 5  — Prophet per zone → forecasted_demand_by_zone.csv
+    "scenario_builder",  # 6  — vrp_nodes.csv + scenario A/B/C variants
+    "forward_vrp",  # 7  — OR-Tools CVRPTW → forward_routes + KPIs
+    "reverse_vrp",  # 8  — OR-Tools CVRPTW → reverse_routes + KPIs
+    "all_zones_aggregator",  # 9  — merge fwd + rev KPIs → all_zones_summary.csv
+    "joint_optimizer",  # 10 — SDVRP hybrid + MILP joint Z + Pareto sweep
     "scenario_analysis",  # 11 — 3-scenario A/B/C KPI table
+    "kpi_reporter",  # 12 — combined KPI report + zone priority ranking
 ]
 
 
@@ -146,17 +152,23 @@ def run_all_zones_aggregator():
 
 def run_joint_optimizer():
     """
-    SDVRP hybrid all zones + joint Z computation.
-    Reads forward + reverse zone dicts from already-solved KPI files.
+    Three sub-stages:
+      1. SDVRP hybrid all zones  → hybrid_routes.json + hybrid_kpi_summary.csv
+      2. Joint MILP optimiser    → joint_optimizer_result.json
+      3. Pareto sweep            → pareto_results.csv + pareto_tradeoff.png
     """
-    import pandas as pd
-    from src.joint_optimizer import run_all_zones_sdvrp
+    from src.joint_optimizer import (
+        run_all_zones_sdvrp,
+        run as run_milp,
+        pareto_sweep,
+    )
     from src.route_parser import build_vrp_nodes, build_reverse_vrp_nodes, NUM_VEHICLES
 
     master = pd.read_parquet("data/master_df_v3.parquet")
     dark_stores = pd.read_csv("data/dark_stores_final.csv")
     return_df = master[master["return_flag"] == 1].copy()
 
+    # ── 1. SDVRP hybrid all zones ────────────────────────────────────────
     fwd_zones = build_vrp_nodes(master, dark_stores)
     rev_zones = build_reverse_vrp_nodes(return_df, dark_stores)
 
@@ -172,11 +184,27 @@ def run_joint_optimizer():
         output_dir="outputs",
     )
 
+    # ── 2. Joint MILP optimiser ──────────────────────────────────────────
+    fwd_routes = pd.read_csv("outputs/forward_routes.csv")
+    rev_routes = pd.read_csv("outputs/reverse_routes.csv")
+    probs = master.loc[master["return_flag"] == 1, "return_prob"]
+
+    run_milp(fwd_routes, rev_routes, probs)
+
+    # ── 3. Pareto sweep (ε-constraint enumeration) ───────────────────────
+    pareto_sweep(fwd_routes, rev_routes, probs)
+
 
 def run_scenario_analysis():
     from src.scenario_analysis import run_all_scenarios
 
     run_all_scenarios(data_dir="data", out_dir="outputs")
+
+
+def run_kpi_reporter():
+    from src.kpi_reporter import run
+
+    run()
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +224,7 @@ RUNNERS = {
     "all_zones_aggregator": run_all_zones_aggregator,
     "joint_optimizer": run_joint_optimizer,
     "scenario_analysis": run_scenario_analysis,
+    "kpi_reporter": run_kpi_reporter,
 }
 
 
