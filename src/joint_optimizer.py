@@ -50,6 +50,10 @@ INTERFACE:
     z_sensitivity_sweep(fwd_routes_df, rev_routes_df, return_probs,
                         alpha_grid, beta_grid, output_path)
         -> pd.DataFrame  # Day 5 (Pritam): α/β grid, γ=δ=(1−α−β)/2
+    pareto_sweep(fwd_routes_df, rev_routes_df, return_probs,
+                 alpha_grid, beta_grid, output_path)
+        -> pd.DataFrame  # Day 6 (Pritam): Pareto front on (routing_cost, T_pen)
+                         #                 marks knee point + is_pareto flag
 """
 
 from __future__ import annotations
@@ -75,8 +79,6 @@ from src.route_parser import (
     SOLVER_TIME_LIMIT_S,
     build_distance_matrix,
     compute_routing_cost,
-    build_vrp_nodes,
-    build_reverse_vrp_nodes,
 )
 
 
@@ -128,8 +130,6 @@ def build_model(
     fwd_cost = (
         forward_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
         .max()
-        .mul(1.5)
-        .add(50)
         .to_dict()
         if not forward_routes_df.empty
         else {}
@@ -137,8 +137,6 @@ def build_model(
     rev_cost = (
         reverse_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
         .max()
-        .mul(1.5)
-        .add(50)
         .to_dict()
         if not reverse_routes_df.empty
         else {}
@@ -154,7 +152,7 @@ def build_model(
     T_pen_expr = (
         gamma
         * expected_returns
-        * (pulp.lpSum((1 - w[v]) for v in rev_vehicles) / max(len(rev_vehicles), 1))
+        * (1 - pulp.lpSum(w.values()) / max(len(rev_vehicles), 1))
     )
 
     # Objective
@@ -206,23 +204,18 @@ def extract_results(
     C_fwd = sum(fwd_cost.get(v, 0) for v in active_fwd)
     C_rev = sum(rev_cost.get(v, 0) for v in active_rev)
     N_veh = len(active_fwd) + len(active_rev)
+    Z = pulp.value(prob.objective) or 0.0
 
     assignments = pd.DataFrame(
         [{"vehicle_id": v, "role": "forward", "active": v in active_fwd} for v in u]
         + [{"vehicle_id": v, "role": "reverse", "active": v in active_rev} for v in w]
     )
 
-    n_rev = max(len(w), 1)
-    inactive_rev = sum(1 for v, var in w.items() if pulp.value(var) < 0.5)
-    actual_t_pen = DEFAULT_GAMMA * vars_dict["expected_returns"] * inactive_rev / n_rev
-
-    Z = pulp.value(prob.objective)
-
     return {
         "Z": round(Z, 3),
         "C_fwd": round(C_fwd, 3),
         "C_rev": round(C_rev, 3),
-        "T_pen": round(actual_t_pen, 3),
+        "T_pen": round(vars_dict["expected_returns"], 3),
         "N_veh": N_veh,
         "status": pulp.LpStatus[prob.status],
         "vehicle_assignments": assignments,
@@ -474,8 +467,8 @@ def solve_sdvrp_hybrid(
 
 
 def run_all_zones_sdvrp(
-    fwd_zones: list[dict] | dict,
-    rev_zones: list[dict] | dict,
+    fwd_zones: dict,
+    rev_zones: dict,
     fwd_kpi_df: pd.DataFrame,
     rev_kpi_df: pd.DataFrame,
     num_vehicles: int = 5,
@@ -507,11 +500,6 @@ def run_all_zones_sdvrp(
 
     fwd_cost_map = fwd_kpi_df.set_index("zone_id")["routing_cost_R$"].to_dict()
     rev_cost_map = rev_kpi_df.set_index("zone_id")["routing_cost_R$"].to_dict()
-
-    if isinstance(fwd_zones, list):
-        fwd_zones = {z["zone_id"]: z for z in fwd_zones}
-    if isinstance(rev_zones, list):
-        rev_zones = {z["zone_id"]: z for z in rev_zones}
 
     zone_ids = sorted(set(fwd_zones.keys()) & set(rev_zones.keys()))
     print(f"[SDVRP-all] Running {len(zone_ids)} zones: {zone_ids}")
@@ -675,27 +663,144 @@ def z_sensitivity_sweep(
 
 
 # ---------------------------------------------------------------------------
-# Entry Point
+# Pareto Sweep  (Pritam — Day 6)
+# ---------------------------------------------------------------------------
+
+
+def pareto_sweep(
+    fwd_routes_df: pd.DataFrame,
+    rev_routes_df: pd.DataFrame,
+    return_probs: pd.Series,
+    alpha_grid: list[float] | None = None,
+    beta_grid: list[float] | None = None,
+    output_path: str | Path = "outputs/pareto_results.csv",
+) -> pd.DataFrame:
+    """
+    Pareto sweep over (alpha, beta) on a {0.1, 0.3, 0.5, 0.7, 0.9}² grid
+    with gamma = delta = (1 - alpha - beta) / 2, for all combos where
+    alpha + beta <= 1.0.  Yields up to 15 valid combinations.
+
+    Identifies the Pareto front on (total_routing_cost, T_pen) axes —
+    non-dominated solutions where no objective can improve without worsening
+    the other.  Marks the knee point as the Pareto-front solution with minimum
+    normalised Euclidean distance to the ideal point (0, 0).
+
+    Parameters
+    ----------
+    fwd_routes_df : forward routes DataFrame
+    rev_routes_df : reverse routes DataFrame
+    return_probs  : pd.Series of return probabilities
+    alpha_grid    : C_fwd weight values; default [0.1, 0.3, 0.5, 0.7, 0.9]
+    beta_grid     : C_rev weight values; default same as alpha_grid
+    output_path   : path to write pareto_results.csv
+
+    Returns
+    -------
+    pd.DataFrame — columns: alpha, beta, gamma, delta, Z, C_fwd, C_rev,
+                             T_pen, N_veh, status, total_routing_cost,
+                             dist_to_ideal, is_pareto, is_knee
+    """
+    if alpha_grid is None:
+        alpha_grid = [0.1, 0.3, 0.5, 0.7, 0.9]
+    if beta_grid is None:
+        beta_grid = alpha_grid
+
+    combos = [(a, b) for a in alpha_grid for b in beta_grid if round(a + b, 10) <= 1.0]
+    print(f"[Pareto] Running {len(combos)} (alpha, beta) combinations ...")
+
+    rows = []
+    for i, (alpha, beta) in enumerate(combos):
+        gamma = delta = round((1.0 - alpha - beta) / 2.0, 6)
+        prob, vars_dict = build_model(
+            fwd_routes_df,
+            rev_routes_df,
+            return_probs,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma,
+            delta=delta,
+        )
+        solve(prob, time_limit_s=30)
+        res = extract_results(prob, vars_dict, fwd_routes_df, rev_routes_df)
+        rows.append(
+            {
+                "alpha": alpha,
+                "beta": beta,
+                "gamma": gamma,
+                "delta": delta,
+                "Z": res["Z"],
+                "C_fwd": res["C_fwd"],
+                "C_rev": res["C_rev"],
+                "T_pen": res["T_pen"],
+                "N_veh": res["N_veh"],
+                "status": res["status"],
+                "total_routing_cost": round(res["C_fwd"] + res["C_rev"], 3),
+            }
+        )
+        if (i + 1) % 5 == 0:
+            print(f"  ... {i + 1}/{len(combos)} done")
+
+    df = pd.DataFrame(rows)
+
+    # ── Pareto front: non-dominated on (total_routing_cost, T_pen) ──────────
+    def _is_pareto(costs: np.ndarray, tpens: np.ndarray) -> np.ndarray:
+        """Boolean mask of non-dominated points (minimise both objectives)."""
+        n = len(costs)
+        dominated = np.zeros(n, dtype=bool)
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                if costs[j] <= costs[i] and tpens[j] <= tpens[i]:
+                    if costs[j] < costs[i] or tpens[j] < tpens[i]:
+                        dominated[i] = True
+                        break
+        return ~dominated
+
+    c_arr = df["total_routing_cost"].values.astype(float)
+    t_arr = df["T_pen"].values.astype(float)
+    pareto_mask = _is_pareto(c_arr, t_arr)
+    df["is_pareto"] = pareto_mask
+
+    # ── Knee point: Pareto-front point nearest to the ideal (0, 0) ──────────
+    c_min, c_max = c_arr.min(), c_arr.max()
+    t_min, t_max = t_arr.min(), t_arr.max()
+    c_range = c_max - c_min if c_max > c_min else 1.0
+    t_range = t_max - t_min if t_max > t_min else 1.0
+    c_norm = (c_arr - c_min) / c_range
+    t_norm = (t_arr - t_min) / t_range
+    df["dist_to_ideal"] = np.sqrt(c_norm**2 + t_norm**2).round(6)
+    df["is_knee"] = False
+
+    pareto_indices = df.index[pareto_mask].tolist()
+    if pareto_indices:
+        knee_idx = df.loc[pareto_indices, "dist_to_ideal"].idxmin()
+        df.loc[knee_idx, "is_knee"] = True
+        kr = df.loc[knee_idx]
+        print(
+            f"[Pareto] Knee: α={kr['alpha']} β={kr['beta']} "
+            f"γ=δ={kr['gamma']}  "
+            f"RoutingCost={kr['total_routing_cost']}  T_pen={kr['T_pen']}"
+        )
+
+    n_pareto = int(pareto_mask.sum())
+    print(f"[Pareto] {n_pareto} Pareto-optimal solutions out of {len(df)} total")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"[Pareto] Saved → {output_path}")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    fwd = pd.read_csv("outputs/forward_routes.csv")
-    rev = pd.read_csv("outputs/reverse_routes.csv")
-    master = pd.read_parquet("data/master_df_v3.parquet")
-    probs = master.loc[master["return_flag"] == 1, "return_prob"]
+    # Minimal synthetic data — just checks the MILP scaffolding runs
+    fwd = pd.DataFrame(
+        {"vehicle_id": [0, 0, 1, 1], "cumulative_distance_km": [10, 20, 5, 15]}
+    )
+    rev = pd.DataFrame({"vehicle_id": [0, 0], "cumulative_distance_km": [8, 16]})
+    probs = pd.Series([0.3, 0.7, 0.1])
     result = run(fwd, rev, probs)
     print(result)
-    # Joint optimizer
-    fwd = pd.read_csv("outputs/forward_routes.csv")
-    rev = pd.read_csv("outputs/reverse_routes.csv")
-    master = pd.read_parquet("data/master_df_v3.parquet")
-    probs = master.loc[master["return_flag"] == 1, "return_prob"]
-    result = run(fwd, rev, probs)
-    print(result)
-
-    # SDVRP hybrid all zones
-    dark_stores = pd.read_csv("data/dark_stores_final.csv")
-    fwd_zones = build_vrp_nodes(master, dark_stores)
-    rev_zones = build_reverse_vrp_nodes(master[master["return_flag"] == 1], dark_stores)
-    fwd_kpi = pd.read_csv("outputs/forward_kpi_summary.csv")
-    rev_kpi = pd.read_csv("outputs/reverse_kpi_summary.csv")
-    run_all_zones_sdvrp(fwd_zones, rev_zones, fwd_kpi, rev_kpi)
