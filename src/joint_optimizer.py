@@ -5,64 +5,43 @@ Stage:  Joint Forward + Reverse Logistics Optimisation (MILP via PuLP)
 Objective (minimise):
     Z = α·C_fwd + β·C_rev + γ·T_pen + δ·N_veh
 
-    C_fwd  = total forward route distance (km)
-    C_rev  = total reverse route distance (km)
-    T_pen  = sum of late-delivery penalties
+    C_fwd  = total forward variable routing cost (R$)
+    C_rev  = total reverse variable routing cost (R$)
+    T_pen  = expected return penalty (unserved reverse demand)
     N_veh  = number of vehicles deployed (forward + reverse)
 
 INPUT:
-    forward_routes_df  : pd.DataFrame  (output of route_parser.py, Day 3)
+    forward_routes_df  : pd.DataFrame  (output of route_parser.py)
         Columns: vehicle_id, stop_seq, node_idx, node_id, lat, lon,
                  cumulative_distance_km, load_after_stop
-    reverse_routes_df  : pd.DataFrame  (output of route_parser.py, Day 4)
+    reverse_routes_df  : pd.DataFrame  (output of route_parser.py)
         Same schema.
     return_probs       : pd.Series indexed by order_id  — float32 ∈ [0,1]
         Output of return_classifier.predict_proba()
     alpha, beta, gamma, delta : float — objective weights
 
 OUTPUT:
-    joint_result : dict
-        {
-            "Z": float,
-            "C_fwd": float, "C_rev": float, "T_pen": float, "N_veh": int,
-            "status": str ("Optimal" | "Feasible" | "Infeasible"),
-            "vehicle_assignments": pd.DataFrame
-                Columns: vehicle_id, role (forward|reverse), active (bool)
-        }
     outputs/joint_optimizer_result.json
+    outputs/pareto_results.csv          — ε-constraint Pareto front
+    outputs/pareto_tradeoff.png         — Pareto front visualisation
 
 INTERFACE:
-    build_model(forward_routes_df, reverse_routes_df, return_probs, alpha, beta, gamma, delta)
-        -> (prob, decision_vars)
-    solve(prob)
-        -> str  # status string
-    extract_results(prob, decision_vars, forward_routes_df, reverse_routes_df)
-        -> dict
-    run(...)
-        -> dict  # convenience: build + solve + extract
-    solve_sdvrp_hybrid(zone_id, fwd_zone, rev_zone, num_vehicles,
-                       separate_cost_r, output_path)
-        -> dict          # Day 5 (Pritam): SDVRP one-zone hybrid solve
-    run_all_zones_sdvrp(fwd_zones, rev_zones, fwd_kpi_df, rev_kpi_df,
-                        num_vehicles, output_dir)
-        -> pd.DataFrame  # Day 5 (Pritam): run all zones, write hybrid_routes.json
-                         #                 + hybrid_kpi_summary.csv
-    z_sensitivity_sweep(fwd_routes_df, rev_routes_df, return_probs,
-                        alpha_grid, beta_grid, output_path)
-        -> pd.DataFrame  # Day 5 (Pritam): α/β grid, γ=δ=(1−α−β)/2
-    pareto_sweep(fwd_routes_df, rev_routes_df, return_probs,
-                 alpha_grid, beta_grid, output_path)
-        -> pd.DataFrame  # Day 6 (Pritam): Pareto front on (routing_cost, T_pen)
-                         #                 marks knee point + is_pareto flag
+    build_model(...)        -> (prob, decision_vars)
+    solve(prob)             -> str
+    extract_results(...)    -> dict
+    run(...)                -> dict
+    solve_sdvrp_hybrid(...) -> dict
+    run_all_zones_sdvrp(...)-> pd.DataFrame
+    z_sensitivity_sweep(...)-> pd.DataFrame
+    pareto_sweep(...)       -> pd.DataFrame
+    save_pareto_plot(df, output_path) -> None
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
 import sys
-from itertools import product as iterproduct
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -77,18 +56,58 @@ from src.route_parser import (
     VEHICLE_SPEED_KMH,
     SERVICE_TIME_MIN,
     SOLVER_TIME_LIMIT_S,
+    FIXED_COST_PER_ROUTE,
+    VAR_COST_PER_KM,
     build_distance_matrix,
     compute_routing_cost,
 )
 
 
 # ---------------------------------------------------------------------------
-# Default objective weights (tuned on Day 6)
-DEFAULT_ALPHA = 1.0  # forward cost weight
-DEFAULT_BETA = 0.8  # reverse cost weight (slightly cheaper per km)
-DEFAULT_GAMMA = 2.0  # penalty weight for late delivery
-DEFAULT_DELTA = 50.0  # fixed cost equivalent per vehicle
+# Default objective weights
 # ---------------------------------------------------------------------------
+DEFAULT_ALPHA = 1.0  # forward variable-cost weight
+DEFAULT_BETA = 0.8  # reverse variable-cost weight
+DEFAULT_GAMMA = 2.0  # penalty weight for unserved returns
+DEFAULT_DELTA = FIXED_COST_PER_ROUTE  # R$ fixed cost per active vehicle
+
+
+# ---------------------------------------------------------------------------
+# Helper — unique vehicle route costs
+# ---------------------------------------------------------------------------
+
+
+def _unique_vehicle_costs(routes_df: pd.DataFrame) -> pd.Series:
+    """
+    Return the total distance (km) per unique physical vehicle route.
+
+    Vehicle IDs reset to 0 in each zone, so grouping by vehicle_id alone
+    merges vehicles from different zones.  If zone_id is present, we group
+    by (zone_id, vehicle_id) and flatten to string keys like "z0_v3".
+
+    Returns
+    -------
+    pd.Series — index = unique vehicle key (str), values = max cumulative km
+                sorted ascending (cheapest routes first).
+    """
+    if routes_df.empty:
+        return pd.Series(dtype=float)
+
+    if "zone_id" in routes_df.columns:
+        costs = routes_df.groupby(["zone_id", "vehicle_id"])[
+            "cumulative_distance_km"
+        ].max()
+        costs.index = [f"z{z}_v{v}" for z, v in costs.index]
+    else:
+        costs = routes_df.groupby("vehicle_id")["cumulative_distance_km"].max()
+        costs.index = [f"v{v}" for v in costs.index]
+
+    return costs.sort_values()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MILP Joint Optimiser
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def build_model(
@@ -106,8 +125,10 @@ def build_model(
     Decision variables:
         u_v ∈ {0,1}  — vehicle v is active for forward routing
         w_v ∈ {0,1}  — vehicle v is active for reverse routing
-        (Routes themselves are fixed from OR-Tools Day 3/4; this MILP chooses
-         which vehicles to activate and handles shared-capacity trade-offs.)
+
+    Per-vehicle costs are converted from km to R$ (variable component only)
+    so the objective is in consistent monetary units.  The fixed cost per
+    vehicle is captured by δ·N_veh.
 
     Returns
     -------
@@ -115,49 +136,28 @@ def build_model(
     """
     prob = pulp.LpProblem("joint_fwd_rev_optimisation", pulp.LpMinimize)
 
-    fwd_vehicles = (
-        forward_routes_df["vehicle_id"].unique().tolist()
-        if not forward_routes_df.empty
-        else []
-    )
-    rev_vehicles = (
-        reverse_routes_df["vehicle_id"].unique().tolist()
-        if not reverse_routes_df.empty
-        else []
-    )
+    # Per unique physical vehicle route: variable routing cost in R$
+    # (groups by zone_id + vehicle_id to avoid merging across zones)
+    fwd_cost_series = _unique_vehicle_costs(forward_routes_df) * VAR_COST_PER_KM
+    rev_cost_series = _unique_vehicle_costs(reverse_routes_df) * VAR_COST_PER_KM
 
-    # Per-vehicle route cost (total km)
-    fwd_cost = (
-        forward_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
-        .max()
-        .to_dict()
-        if not forward_routes_df.empty
-        else {}
-    )
-    rev_cost = (
-        reverse_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
-        .max()
-        .to_dict()
-        if not reverse_routes_df.empty
-        else {}
-    )
+    fwd_vehicles = fwd_cost_series.index.tolist()
+    rev_vehicles = rev_cost_series.index.tolist()
+    fwd_cost = fwd_cost_series.to_dict()
+    rev_cost = rev_cost_series.to_dict()
 
     # Binary activation variables
     u = {v: pulp.LpVariable(f"u_{v}", cat="Binary") for v in fwd_vehicles}
     w = {v: pulp.LpVariable(f"w_{v}", cat="Binary") for v in rev_vehicles}
 
-    # Expected return penalty: high return_prob orders that are on forward routes
-    # incur a latency penalty if the reverse trip is not activated same day.
+    # Expected return penalty — decreases as more reverse vehicles are active
     expected_returns = float(return_probs.sum()) if not return_probs.empty else 0.0
-    T_pen_expr = (
-        gamma
-        * expected_returns
-        * (1 - pulp.lpSum(w.values()) / max(len(rev_vehicles), 1))
-    )
+    n_rev = max(len(rev_vehicles), 1)
+    T_pen_expr = gamma * expected_returns * (1 - pulp.lpSum(w.values()) / n_rev)
 
-    # Objective
-    C_fwd_expr = alpha * pulp.lpSum(fwd_cost.get(v, 0) * u[v] for v in fwd_vehicles)
-    C_rev_expr = beta * pulp.lpSum(rev_cost.get(v, 0) * w[v] for v in rev_vehicles)
+    # Objective components
+    C_fwd_expr = alpha * pulp.lpSum(fwd_cost[v] * u[v] for v in fwd_vehicles)
+    C_rev_expr = beta * pulp.lpSum(rev_cost[v] * w[v] for v in rev_vehicles)
     N_veh_expr = delta * (pulp.lpSum(u.values()) + pulp.lpSum(w.values()))
 
     prob += C_fwd_expr + C_rev_expr + T_pen_expr + N_veh_expr, "total_cost"
@@ -175,7 +175,7 @@ def build_model(
         "rev_cost": rev_cost,
         "expected_returns": expected_returns,
         "gamma": gamma,
-        "n_rev": len(rev_vehicles),
+        "n_rev": n_rev,
     }
 
 
@@ -213,7 +213,7 @@ def extract_results(
         + [{"vehicle_id": v, "role": "reverse", "active": v in active_rev} for v in w]
     )
 
-    gamma = vars_dict.get("gamma", 1.0)
+    gamma = vars_dict.get("gamma", DEFAULT_GAMMA)
     n_rev = vars_dict.get("n_rev", max(len(w), 1))
     T_pen = (
         gamma * vars_dict["expected_returns"] * (1.0 - len(active_rev) / max(n_rev, 1))
@@ -256,9 +256,9 @@ def run(
     return result
 
 
-# ---------------------------------------------------------------------------
-# SDVRP Hybrid Solver  (Pritam — Day 5)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+#  SDVRP Hybrid Solver  (Pritam — Day 5)
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def solve_sdvrp_hybrid(
@@ -280,24 +280,8 @@ def solve_sdvrp_hybrid(
         transit[i] = pickup_weight[i] − delivery_weight[i]
         fix_start_cumul_to_zero=False → OR-Tools sets start = total_delivery_wt
         Constraint: 0 ≤ Load_cumul[i] ≤ VEHICLE_CAPACITY_G for all nodes
-
-    Parameters
-    ----------
-    zone_id         : zone ID (int, for labelling)
-    fwd_zone        : zone dict from route_parser.build_vrp_nodes()
-    rev_zone        : zone dict from route_parser.build_reverse_vrp_nodes()
-    num_vehicles    : max vehicles available for hybrid solve
-    separate_cost_r : known cost of running fwd+rev separately (R$), for saving calc
-    output_path     : path to write result JSON
-
-    Returns
-    -------
-    dict  — zone_id, solved, n_deliveries, n_pickups, total_dist_km,
-            n_vehicles, hybrid_cost_R$, separate_cost_R$, saving_R$,
-            saving_pct, strategy
     """
     # ---- 1. Build combined node list ---------------------------------- #
-    # Node 0: depot  |  1..n_del: delivery  |  n_del+1..: pickup
     n_del = len(fwd_zone["node_coords"]) - 1
     n_pick = len(rev_zone["node_coords"]) - 1
 
@@ -318,7 +302,7 @@ def solve_sdvrp_hybrid(
     n_nodes = 1 + n_del + n_pick
 
     # ---- 2. Distance & time matrices ---------------------------------- #
-    dist_matrix = build_distance_matrix(node_coords)  # metres, float64
+    dist_matrix = build_distance_matrix(node_coords)
     speed_m_per_min = VEHICLE_SPEED_KMH * 1000 / 60
     time_matrix = np.rint(dist_matrix / speed_m_per_min).astype(int)
 
@@ -345,11 +329,6 @@ def solve_sdvrp_hybrid(
         time_dim.CumulVar(manager.NodeToIndex(node_idx)).SetRange(open_t, close_t)
 
     # ---- 4. Single-dimension SDVRP load model ------------------------- #
-    # Correct SDVRP invariant:
-    #   load(t) = initial_delivery_load - delivered(t) + picked_up(t)
-    # transit[i] = pickup_weight[i] - delivery_weight[i]  (net change per node)
-    # fix_start_cumul_to_zero=False lets OR-Tools pick start = total_delivery_wt
-    # for each vehicle; cumul bounded [0, VEHICLE_CAPACITY_G] enforces capacity.
     def load_transit_cb(i):
         node = manager.IndexToNode(i)
         return int(pick_demand_arr[node]) - int(del_demand_arr[node])
@@ -399,7 +378,6 @@ def solve_sdvrp_hybrid(
     total_dist_m = 0.0
     n_veh_used = 0
     route_records: list[dict] = []
-    veh_max_km: list[float] = []
 
     for v in range(num_vehicles):
         idx = routing.Start(v)
@@ -428,14 +406,17 @@ def solve_sdvrp_hybrid(
         if cum_dist_km > 0:
             total_dist_m += cum_dist_km * 1000.0
             n_veh_used += 1
-            veh_max_km.append(cum_dist_km)
             route_records.extend(veh_stops)
 
     total_dist_km = total_dist_m / 1000.0
     hybrid_cost = compute_routing_cost(n_veh_used, total_dist_km)
 
     saving_r = round(separate_cost_r - hybrid_cost, 2) if separate_cost_r else None
-    saving_pct = round(saving_r / separate_cost_r * 100, 1) if saving_r else None
+    saving_pct = (
+        round(saving_r / separate_cost_r * 100, 1)
+        if saving_r and separate_cost_r
+        else None
+    )
 
     result = {
         "zone_id": zone_id,
@@ -458,7 +439,7 @@ def solve_sdvrp_hybrid(
         json.dump(serialisable, f, indent=2)
 
     sep_str = (
-        f"vs R${separate_cost_r:.2f} separate \u2192 {saving_pct:.1f}% saving"
+        f"vs R${separate_cost_r:.2f} separate → {saving_pct:.1f}% saving"
         if saving_r
         else ""
     )
@@ -469,42 +450,38 @@ def solve_sdvrp_hybrid(
     return result
 
 
-# ---------------------------------------------------------------------------
-# All-Zone SDVRP Runner  (Pritam — Day 5)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+#  All-Zone SDVRP Runner  (Pritam — Day 5)
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def run_all_zones_sdvrp(
-    fwd_zones: dict,
-    rev_zones: dict,
+    fwd_zones: list[dict] | dict,
+    rev_zones: list[dict] | dict,
     fwd_kpi_df: pd.DataFrame,
     rev_kpi_df: pd.DataFrame,
     num_vehicles: int = 5,
     output_dir: str | Path = "outputs",
 ) -> pd.DataFrame:
     """
-    Run solve_sdvrp_hybrid for every zone and write Vybhav-ready outputs.
+    Run solve_sdvrp_hybrid for every zone and write outputs.
 
-    Parameters
-    ----------
-    fwd_zones    : zone dict map from route_parser.build_vrp_nodes()
-    rev_zones    : zone dict map from route_parser.build_reverse_vrp_nodes()
-    fwd_kpi_df   : forward_kpi_summary DataFrame (zone_id, routing_cost_R$)
-    rev_kpi_df   : reverse_kpi_summary DataFrame (zone_id, routing_cost_R$)
-    num_vehicles : max vehicles per zone hybrid solve
-    output_dir   : directory to write outputs
-
-    Returns
-    -------
-    pd.DataFrame — hybrid_kpi_summary (one row per solved zone)
+    Accepts zone data as either a list of zone dicts (from build_vrp_nodes)
+    or a dict keyed by zone_id.  Lists are converted to dicts internally.
 
     Writes
     ------
-    <output_dir>/hybrid_routes.json       — matches forward_routes.json schema
-    <output_dir>/hybrid_kpi_summary.csv   — per-zone KPIs + saving vs separate
+    <output_dir>/hybrid_routes.json
+    <output_dir>/hybrid_kpi_summary.csv
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+
+    # ── Normalise to dict keyed by zone_id ──────────────────────────────
+    if isinstance(fwd_zones, list):
+        fwd_zones = {z["zone_id"]: z for z in fwd_zones}
+    if isinstance(rev_zones, list):
+        rev_zones = {z["zone_id"]: z for z in rev_zones}
 
     fwd_cost_map = fwd_kpi_df.set_index("zone_id")["routing_cost_R$"].to_dict()
     rev_cost_map = rev_kpi_df.set_index("zone_id")["routing_cost_R$"].to_dict()
@@ -568,13 +545,14 @@ def run_all_zones_sdvrp(
     with open(routes_path, "w") as f:
         json.dump(all_zone_routes, f, indent=2)
     print(
-        f"[SDVRP-all] hybrid_routes.json \u2192 {routes_path}  ({len(all_zone_routes)} zones)"
+        f"[SDVRP-all] hybrid_routes.json → {routes_path}  "
+        f"({len(all_zone_routes)} zones)"
     )
 
     kpi_df = pd.DataFrame(kpi_rows)
     kpi_path = out / "hybrid_kpi_summary.csv"
     kpi_df.to_csv(kpi_path, index=False)
-    print(f"[SDVRP-all] hybrid_kpi_summary.csv \u2192 {kpi_path}")
+    print(f"[SDVRP-all] hybrid_kpi_summary.csv → {kpi_path}")
 
     if "saving_R$" in kpi_df.columns:
         total_saving = kpi_df["saving_R$"].dropna().sum()
@@ -583,9 +561,9 @@ def run_all_zones_sdvrp(
     return kpi_df
 
 
-# ---------------------------------------------------------------------------
-# Z Weight Sensitivity Sweep  (Pritam — Day 5)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+#  Z Weight Sensitivity Sweep  (Pritam — Day 5)
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def z_sensitivity_sweep(
@@ -599,26 +577,11 @@ def z_sensitivity_sweep(
     """
     Grid-search over (alpha, beta) with gamma=delta=(1-alpha-beta)/2.
 
-    Iterates every (alpha, beta) pair in alpha_grid x beta_grid where
-    alpha + beta <= 0.9.  For each valid pair:
-        gamma = delta = (1 - alpha - beta) / 2
-
-    Parameters
-    ----------
-    fwd_routes_df : forward routes DataFrame
-    rev_routes_df : reverse routes DataFrame
-    return_probs  : pd.Series of return probabilities
-    alpha_grid    : C_fwd weight values; default [0.1, 0.2, ..., 0.8]
-    beta_grid     : C_rev weight values; default same as alpha_grid
-    output_path   : path to write CSV
-
-    Returns
-    -------
-    pd.DataFrame — columns: alpha, beta, gamma, delta, Z,
-                             C_fwd, C_rev, T_pen, N_veh, status
+    Iterates every (alpha, beta) pair where alpha + beta <= 0.9.
+    For each valid pair: gamma = delta = (1 - alpha - beta) / 2.
     """
     if alpha_grid is None:
-        alpha_grid = [round(i * 0.1, 1) for i in range(1, 9)]  # 0.1 .. 0.8
+        alpha_grid = [round(i * 0.1, 1) for i in range(1, 9)]
     if beta_grid is None:
         beta_grid = alpha_grid
 
@@ -670,9 +633,85 @@ def z_sensitivity_sweep(
     return df
 
 
-# ---------------------------------------------------------------------------
-# Pareto Sweep  (Pritam — Day 6)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+#  Pareto Sweep — ε-constraint enumeration  (Pritam — Day 6)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def save_pareto_plot(
+    df: pd.DataFrame,
+    output_path: str | Path = "outputs/pareto_tradeoff.png",
+) -> None:
+    """
+    Generate the Pareto front scatter + line plot.
+
+    Axes:
+        x = Total routing cost (R$)   — includes variable + fixed vehicle costs
+        y = T_pen (return penalty R$)  — decreases as more reverse vehicles active
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    non_pareto = df[~df["is_pareto"]]
+    pareto = df[df["is_pareto"]].sort_values("total_routing_cost")
+    knee = df[df["is_knee"]]
+
+    ax.scatter(
+        non_pareto["total_routing_cost"],
+        non_pareto["T_pen"],
+        alpha=0.25,
+        s=25,
+        color="gray",
+        label="Dominated",
+    )
+    ax.plot(
+        pareto["total_routing_cost"],
+        pareto["T_pen"],
+        "o-",
+        color="steelblue",
+        markersize=8,
+        linewidth=2,
+        label="Pareto front",
+    )
+    if not knee.empty:
+        ax.scatter(
+            knee["total_routing_cost"],
+            knee["T_pen"],
+            s=250,
+            marker="*",
+            color="crimson",
+            zorder=10,
+            label="Knee point",
+        )
+        kr = knee.iloc[0]
+        ax.annotate(
+            f"  Knee: R${kr['total_routing_cost']:.0f} / T={kr['T_pen']:.1f}",
+            xy=(kr["total_routing_cost"], kr["T_pen"]),
+            fontsize=9,
+            fontweight="bold",
+            color="crimson",
+        )
+
+    ax.set_xlabel("Total Routing Cost (R$)", fontsize=12)
+    ax.set_ylabel("Return Penalty  T_pen (R$)", fontsize=12)
+    ax.set_title(
+        "Pareto Front — Routing Cost vs Return Penalty\n"
+        "(ε-constraint enumeration over active vehicle counts)",
+        fontsize=13,
+        fontweight="bold",
+    )
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[Pareto] Plot saved → {output_path}")
 
 
 def pareto_sweep(
@@ -682,97 +721,71 @@ def pareto_sweep(
     gamma: float = DEFAULT_GAMMA,
     delta: float = DEFAULT_DELTA,
     output_path: str | Path = "outputs/pareto_results.csv",
-    # legacy params kept for backwards-compatibility, not used
-    alpha_grid: list[float] | None = None,
-    beta_grid: list[float] | None = None,
+    plot_path: str | Path = "outputs/pareto_tradeoff.png",
 ) -> pd.DataFrame:
     """
-    Pareto sweep using the **ε-constraint enumeration method**.
+    Pareto sweep using **ε-constraint enumeration**.
 
-    Enumerates all combinations of (k_fwd, k_rev) — the number of active
-    forward and reverse vehicles — from 1 to their respective maximums.
-    For each combination, the cheapest k vehicles of each type are selected
-    (optimal for a fixed-route vehicle-selection problem).  Outcomes are
-    computed analytically (no MILP per point needed).
+    Enumerates all (k_fwd, k_rev) combinations — how many forward and
+    reverse vehicles to activate.  For each combination the cheapest k
+    vehicles of each type are selected (optimal for fixed-route selection).
+    Costs are computed analytically (no MILP per point).
 
-    This generates the true Pareto front on the two conflicting objectives:
-        Obj 1 (minimise): total_routing_cost = C_fwd + C_rev
-        Obj 2 (minimise): T_pen = γ × expected_returns × (1 − k_rev / n_rev)
+    Two conflicting objectives:
+        Obj 1 (min): total_routing_cost = variable_R$ + fixed_cost × N_veh
+        Obj 2 (min): T_pen = γ × expected_returns × (1 − k_rev / n_rev)
 
-    Increasing k_rev lowers T_pen but raises C_rev (more vehicles operated).
-    The Pareto front consists of (k_rev, lowest-C_routing) non-dominated
-    operating points.
-
-    Parameters
-    ----------
-    fwd_routes_df : forward routes DataFrame (output of route_parser)
-    rev_routes_df : reverse routes DataFrame
-    return_probs  : pd.Series of return probabilities (used via .sum())
-    gamma         : T_pen weight — kept consistent with the joint MILP
-    delta         : per-vehicle cost — used to compute Z for informational column
-    output_path   : path to write pareto_results.csv
+    All monetary values are in R$ for consistent units.
 
     Returns
     -------
-    pd.DataFrame — columns: n_fwd_active, n_rev_active, gamma, delta,
-                             C_fwd, C_rev, T_pen, N_veh, total_routing_cost,
-                             Z, dist_to_ideal, is_pareto, is_knee
+    pd.DataFrame with columns:
+        n_fwd_active, n_rev_active, gamma, delta,
+        C_fwd, C_rev, T_pen, N_veh, total_routing_cost,
+        Z, dist_to_ideal, is_pareto, is_knee
     """
-    # ── Per-vehicle cumulative route costs (total km per vehicle) ───────────
-    fwd_cost_series = (
-        fwd_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
-        .max()
-        .sort_values()
-        if not fwd_routes_df.empty
-        else pd.Series(dtype=float)
-    )
-    rev_cost_series = (
-        rev_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
-        .max()
-        .sort_values()
-        if not rev_routes_df.empty
-        else pd.Series(dtype=float)
-    )
+    # ── Per unique vehicle route: variable costs (R$, cheapest-first) ──
+    fwd_cost_series = _unique_vehicle_costs(fwd_routes_df)  # km, sorted
+    rev_cost_series = _unique_vehicle_costs(rev_routes_df)
 
-    fwd_costs = fwd_cost_series.values  # sorted cheapest-first
-    rev_costs = rev_cost_series.values
+    # Convert km → R$ variable cost
+    fwd_costs = (fwd_cost_series * VAR_COST_PER_KM).values
+    rev_costs = (rev_cost_series * VAR_COST_PER_KM).values
     n_fwd = len(fwd_costs)
     n_rev = len(rev_costs)
 
     if n_fwd == 0 or n_rev == 0:
-        raise ValueError("[Pareto] forwad or reverse routes DataFrame is empty.")
+        raise ValueError("[Pareto] forward or reverse routes DataFrame is empty.")
 
     expected_returns = float(return_probs.sum()) if len(return_probs) > 0 else 0.0
 
-    # Prefix sums for cheapest-k costs
-    fwd_prefix = np.cumsum(
-        fwd_costs
-    )  # fwd_prefix[k-1] = cost of cheapest k fwd vehicles
+    # Prefix sums for cheapest-k variable costs
+    fwd_prefix = np.cumsum(fwd_costs)
     rev_prefix = np.cumsum(rev_costs)
 
-    n_combos = n_fwd * n_rev
     print(
         f"[Pareto] ε-constraint enumeration: {n_fwd} fwd × {n_rev} rev "
-        f"= {n_combos} combinations"
+        f"= {n_fwd * n_rev} combinations"
     )
 
     rows = []
     for k_fwd in range(1, n_fwd + 1):
         for k_rev in range(1, n_rev + 1):
-            c_fwd = float(fwd_prefix[k_fwd - 1])
-            c_rev = float(rev_prefix[k_rev - 1])
-            t_pen = gamma * expected_returns * (1.0 - k_rev / n_rev)
+            c_fwd_var = float(fwd_prefix[k_fwd - 1])
+            c_rev_var = float(rev_prefix[k_rev - 1])
             n_veh = k_fwd + k_rev
-            routing = round(c_fwd + c_rev, 3)
-            z = round(c_fwd + c_rev + t_pen + delta * n_veh, 3)
+            fixed = delta * n_veh
+            t_pen = gamma * expected_returns * (1.0 - k_rev / n_rev)
+            routing = round(c_fwd_var + c_rev_var + fixed, 3)
+            z = round(routing + t_pen, 3)
             rows.append(
                 {
                     "n_fwd_active": k_fwd,
                     "n_rev_active": k_rev,
                     "gamma": gamma,
                     "delta": delta,
-                    "C_fwd": round(c_fwd, 3),
-                    "C_rev": round(c_rev, 3),
+                    "C_fwd": round(c_fwd_var, 3),
+                    "C_rev": round(c_rev_var, 3),
                     "T_pen": round(t_pen, 3),
                     "N_veh": n_veh,
                     "total_routing_cost": routing,
@@ -782,13 +795,15 @@ def pareto_sweep(
 
     df = pd.DataFrame(rows)
 
-    # ── Pareto front: non-dominated on (total_routing_cost, T_pen) ──────────
+    # ── Pareto front: non-dominated on (total_routing_cost, T_pen) ──────
     def _is_pareto(costs: np.ndarray, tpens: np.ndarray) -> np.ndarray:
         n = len(costs)
         dominated = np.zeros(n, dtype=bool)
         for i in range(n):
+            if dominated[i]:
+                continue
             for j in range(n):
-                if i == j:
+                if i == j or dominated[j]:
                     continue
                 if costs[j] <= costs[i] and tpens[j] <= tpens[i]:
                     if costs[j] < costs[i] or tpens[j] < tpens[i]:
@@ -801,7 +816,7 @@ def pareto_sweep(
     pareto_mask = _is_pareto(c_arr, t_arr)
     df["is_pareto"] = pareto_mask
 
-    # ── Knee point ───────────────────────────────────────────────────────────
+    # ── Knee point (closest normalised distance to ideal) ────────────────
     c_min, c_max = c_arr.min(), c_arr.max()
     t_min, t_max = t_arr.min(), t_arr.max()
     c_range = c_max - c_min if c_max > c_min else 1.0
@@ -817,28 +832,76 @@ def pareto_sweep(
         df.loc[knee_idx, "is_knee"] = True
         kr = df.loc[knee_idx]
         print(
-            f"[Pareto] Knee: k_fwd={int(kr['n_fwd_active'])} k_rev={int(kr['n_rev_active'])}  "
-            f"RoutingCost={kr['total_routing_cost']:.3f}  T_pen={kr['T_pen']:.3f}"
+            f"[Pareto] Knee: k_fwd={int(kr['n_fwd_active'])} "
+            f"k_rev={int(kr['n_rev_active'])}  "
+            f"RoutingCost=R${kr['total_routing_cost']:.2f}  "
+            f"T_pen={kr['T_pen']:.3f}"
         )
 
     n_pareto = int(pareto_mask.sum())
     print(f"[Pareto] {n_pareto} Pareto-optimal solutions out of {len(df)} total")
 
+    # ── Save CSV ─────────────────────────────────────────────────────────
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
     print(f"[Pareto] Saved → {output_path}")
+
+    # ── Save plot ────────────────────────────────────────────────────────
+    try:
+        save_pareto_plot(df, output_path=plot_path)
+    except Exception as e:
+        print(f"[Pareto] WARNING: Plot generation failed — {e}")
+        print("         CSV was saved successfully; plot can be generated later.")
+
     return df
 
 
-# ---------------------------------------------------------------------------
-# Smoke test
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+#  Entry Point
+# ═══════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
-    # Minimal synthetic data — just checks the MILP scaffolding runs
-    fwd = pd.DataFrame(
-        {"vehicle_id": [0, 0, 1, 1], "cumulative_distance_km": [10, 20, 5, 15]}
-    )
-    rev = pd.DataFrame({"vehicle_id": [0, 0], "cumulative_distance_km": [8, 16]})
-    probs = pd.Series([0.3, 0.7, 0.1])
+    # ── Try loading real pipeline outputs; fall back to synthetic ────────
+    fwd_path = Path("outputs/forward_routes.csv")
+    rev_path = Path("outputs/reverse_routes.csv")
+    master_path = Path("data/master_df_v3.parquet")
+
+    if fwd_path.exists() and rev_path.exists() and master_path.exists():
+        fwd = pd.read_csv(fwd_path)
+        rev = pd.read_csv(rev_path)
+        master = pd.read_parquet(master_path)
+        probs = master.loc[master["return_flag"] == 1, "return_prob"]
+    else:
+        print("[joint_optimizer] Real data not found — using synthetic smoke test")
+        fwd = pd.DataFrame(
+            {
+                "vehicle_id": [0, 0, 1, 1, 0, 0, 1, 1],
+                "zone_id": [0, 0, 0, 0, 1, 1, 1, 1],
+                "cumulative_distance_km": [10, 20, 5, 15, 8, 18, 6, 12],
+            }
+        )
+        rev = pd.DataFrame(
+            {
+                "vehicle_id": [0, 0, 0, 0],
+                "zone_id": [0, 0, 1, 1],
+                "cumulative_distance_km": [8, 16, 5, 10],
+            }
+        )
+        probs = pd.Series([0.3, 0.7, 0.1])
+
+    # ── 1. Joint MILP optimiser ──────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("  JOINT OPTIMISER — MILP")
+    print("=" * 60)
     result = run(fwd, rev, probs)
     print(result)
+
+    # ── 2. Pareto sweep ──────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("  PARETO SWEEP — ε-constraint enumeration")
+    print("=" * 60)
+    pareto_df = pareto_sweep(fwd, rev, probs)
+
+    print("\n" + "=" * 60)
+    print("  JOINT OPTIMIZER COMPLETE")
+    print("=" * 60)
