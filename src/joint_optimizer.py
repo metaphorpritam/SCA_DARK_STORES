@@ -174,6 +174,8 @@ def build_model(
         "fwd_cost": fwd_cost,
         "rev_cost": rev_cost,
         "expected_returns": expected_returns,
+        "gamma": gamma,
+        "n_rev": len(rev_vehicles),
     }
 
 
@@ -211,11 +213,17 @@ def extract_results(
         + [{"vehicle_id": v, "role": "reverse", "active": v in active_rev} for v in w]
     )
 
+    gamma = vars_dict.get("gamma", 1.0)
+    n_rev = vars_dict.get("n_rev", max(len(w), 1))
+    T_pen = (
+        gamma * vars_dict["expected_returns"] * (1.0 - len(active_rev) / max(n_rev, 1))
+    )
+
     return {
         "Z": round(Z, 3),
         "C_fwd": round(C_fwd, 3),
         "C_rev": round(C_rev, 3),
-        "T_pen": round(vars_dict["expected_returns"], 3),
+        "T_pen": round(T_pen, 3),
         "N_veh": N_veh,
         "status": pulp.LpStatus[prob.status],
         "vehicle_assignments": assignments,
@@ -671,80 +679,111 @@ def pareto_sweep(
     fwd_routes_df: pd.DataFrame,
     rev_routes_df: pd.DataFrame,
     return_probs: pd.Series,
+    gamma: float = DEFAULT_GAMMA,
+    delta: float = DEFAULT_DELTA,
+    output_path: str | Path = "outputs/pareto_results.csv",
+    # legacy params kept for backwards-compatibility, not used
     alpha_grid: list[float] | None = None,
     beta_grid: list[float] | None = None,
-    output_path: str | Path = "outputs/pareto_results.csv",
 ) -> pd.DataFrame:
     """
-    Pareto sweep over (alpha, beta) on a {0.1, 0.3, 0.5, 0.7, 0.9}² grid
-    with gamma = delta = (1 - alpha - beta) / 2, for all combos where
-    alpha + beta <= 1.0.  Yields up to 15 valid combinations.
+    Pareto sweep using the **ε-constraint enumeration method**.
 
-    Identifies the Pareto front on (total_routing_cost, T_pen) axes —
-    non-dominated solutions where no objective can improve without worsening
-    the other.  Marks the knee point as the Pareto-front solution with minimum
-    normalised Euclidean distance to the ideal point (0, 0).
+    Enumerates all combinations of (k_fwd, k_rev) — the number of active
+    forward and reverse vehicles — from 1 to their respective maximums.
+    For each combination, the cheapest k vehicles of each type are selected
+    (optimal for a fixed-route vehicle-selection problem).  Outcomes are
+    computed analytically (no MILP per point needed).
+
+    This generates the true Pareto front on the two conflicting objectives:
+        Obj 1 (minimise): total_routing_cost = C_fwd + C_rev
+        Obj 2 (minimise): T_pen = γ × expected_returns × (1 − k_rev / n_rev)
+
+    Increasing k_rev lowers T_pen but raises C_rev (more vehicles operated).
+    The Pareto front consists of (k_rev, lowest-C_routing) non-dominated
+    operating points.
 
     Parameters
     ----------
-    fwd_routes_df : forward routes DataFrame
+    fwd_routes_df : forward routes DataFrame (output of route_parser)
     rev_routes_df : reverse routes DataFrame
-    return_probs  : pd.Series of return probabilities
-    alpha_grid    : C_fwd weight values; default [0.1, 0.3, 0.5, 0.7, 0.9]
-    beta_grid     : C_rev weight values; default same as alpha_grid
+    return_probs  : pd.Series of return probabilities (used via .sum())
+    gamma         : T_pen weight — kept consistent with the joint MILP
+    delta         : per-vehicle cost — used to compute Z for informational column
     output_path   : path to write pareto_results.csv
 
     Returns
     -------
-    pd.DataFrame — columns: alpha, beta, gamma, delta, Z, C_fwd, C_rev,
-                             T_pen, N_veh, status, total_routing_cost,
-                             dist_to_ideal, is_pareto, is_knee
+    pd.DataFrame — columns: n_fwd_active, n_rev_active, gamma, delta,
+                             C_fwd, C_rev, T_pen, N_veh, total_routing_cost,
+                             Z, dist_to_ideal, is_pareto, is_knee
     """
-    if alpha_grid is None:
-        alpha_grid = [0.1, 0.3, 0.5, 0.7, 0.9]
-    if beta_grid is None:
-        beta_grid = alpha_grid
+    # ── Per-vehicle cumulative route costs (total km per vehicle) ───────────
+    fwd_cost_series = (
+        fwd_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
+        .max()
+        .sort_values()
+        if not fwd_routes_df.empty
+        else pd.Series(dtype=float)
+    )
+    rev_cost_series = (
+        rev_routes_df.groupby("vehicle_id")["cumulative_distance_km"]
+        .max()
+        .sort_values()
+        if not rev_routes_df.empty
+        else pd.Series(dtype=float)
+    )
 
-    combos = [(a, b) for a in alpha_grid for b in beta_grid if round(a + b, 10) <= 1.0]
-    print(f"[Pareto] Running {len(combos)} (alpha, beta) combinations ...")
+    fwd_costs = fwd_cost_series.values  # sorted cheapest-first
+    rev_costs = rev_cost_series.values
+    n_fwd = len(fwd_costs)
+    n_rev = len(rev_costs)
+
+    if n_fwd == 0 or n_rev == 0:
+        raise ValueError("[Pareto] forwad or reverse routes DataFrame is empty.")
+
+    expected_returns = float(return_probs.sum()) if len(return_probs) > 0 else 0.0
+
+    # Prefix sums for cheapest-k costs
+    fwd_prefix = np.cumsum(
+        fwd_costs
+    )  # fwd_prefix[k-1] = cost of cheapest k fwd vehicles
+    rev_prefix = np.cumsum(rev_costs)
+
+    n_combos = n_fwd * n_rev
+    print(
+        f"[Pareto] ε-constraint enumeration: {n_fwd} fwd × {n_rev} rev "
+        f"= {n_combos} combinations"
+    )
 
     rows = []
-    for i, (alpha, beta) in enumerate(combos):
-        gamma = delta = round((1.0 - alpha - beta) / 2.0, 6)
-        prob, vars_dict = build_model(
-            fwd_routes_df,
-            rev_routes_df,
-            return_probs,
-            alpha=alpha,
-            beta=beta,
-            gamma=gamma,
-            delta=delta,
-        )
-        solve(prob, time_limit_s=30)
-        res = extract_results(prob, vars_dict, fwd_routes_df, rev_routes_df)
-        rows.append(
-            {
-                "alpha": alpha,
-                "beta": beta,
-                "gamma": gamma,
-                "delta": delta,
-                "Z": res["Z"],
-                "C_fwd": res["C_fwd"],
-                "C_rev": res["C_rev"],
-                "T_pen": res["T_pen"],
-                "N_veh": res["N_veh"],
-                "status": res["status"],
-                "total_routing_cost": round(res["C_fwd"] + res["C_rev"], 3),
-            }
-        )
-        if (i + 1) % 5 == 0:
-            print(f"  ... {i + 1}/{len(combos)} done")
+    for k_fwd in range(1, n_fwd + 1):
+        for k_rev in range(1, n_rev + 1):
+            c_fwd = float(fwd_prefix[k_fwd - 1])
+            c_rev = float(rev_prefix[k_rev - 1])
+            t_pen = gamma * expected_returns * (1.0 - k_rev / n_rev)
+            n_veh = k_fwd + k_rev
+            routing = round(c_fwd + c_rev, 3)
+            z = round(c_fwd + c_rev + t_pen + delta * n_veh, 3)
+            rows.append(
+                {
+                    "n_fwd_active": k_fwd,
+                    "n_rev_active": k_rev,
+                    "gamma": gamma,
+                    "delta": delta,
+                    "C_fwd": round(c_fwd, 3),
+                    "C_rev": round(c_rev, 3),
+                    "T_pen": round(t_pen, 3),
+                    "N_veh": n_veh,
+                    "total_routing_cost": routing,
+                    "Z": z,
+                }
+            )
 
     df = pd.DataFrame(rows)
 
     # ── Pareto front: non-dominated on (total_routing_cost, T_pen) ──────────
     def _is_pareto(costs: np.ndarray, tpens: np.ndarray) -> np.ndarray:
-        """Boolean mask of non-dominated points (minimise both objectives)."""
         n = len(costs)
         dominated = np.zeros(n, dtype=bool)
         for i in range(n):
@@ -762,7 +801,7 @@ def pareto_sweep(
     pareto_mask = _is_pareto(c_arr, t_arr)
     df["is_pareto"] = pareto_mask
 
-    # ── Knee point: Pareto-front point nearest to the ideal (0, 0) ──────────
+    # ── Knee point ───────────────────────────────────────────────────────────
     c_min, c_max = c_arr.min(), c_arr.max()
     t_min, t_max = t_arr.min(), t_arr.max()
     c_range = c_max - c_min if c_max > c_min else 1.0
@@ -778,9 +817,8 @@ def pareto_sweep(
         df.loc[knee_idx, "is_knee"] = True
         kr = df.loc[knee_idx]
         print(
-            f"[Pareto] Knee: α={kr['alpha']} β={kr['beta']} "
-            f"γ=δ={kr['gamma']}  "
-            f"RoutingCost={kr['total_routing_cost']}  T_pen={kr['T_pen']}"
+            f"[Pareto] Knee: k_fwd={int(kr['n_fwd_active'])} k_rev={int(kr['n_rev_active'])}  "
+            f"RoutingCost={kr['total_routing_cost']:.3f}  T_pen={kr['T_pen']:.3f}"
         )
 
     n_pareto = int(pareto_mask.sum())
