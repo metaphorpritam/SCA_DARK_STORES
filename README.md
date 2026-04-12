@@ -76,8 +76,8 @@ pip install -r requirements.txt
 kaggle datasets download -d olistbr/brazilian-ecommerce -p data/raw --unzip
 
 # Option 2 — Manual
-# Download from https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce
-# Extract all 9 CSVs into data/raw/
+Download from https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce
+Extract all 9 CSVs into data/raw/
 ```
 
 ---
@@ -149,6 +149,9 @@ SCA_DARK_STORES/
 ├── requirements.txt            # pip-compatible mirror
 └── PROJECT_PLAN.md             # Detailed project plan, methodology, and task allocation
 ```
+
+> Link to [Drive](https://drive.google.com/drive/folders/1sGPz3Rm8Gzfj0fewL-sj6XpEQvugcWsb?usp=sharing)
+> For notebooks, architecrue, development plan, refer to the drive link above!
 
 ---
 

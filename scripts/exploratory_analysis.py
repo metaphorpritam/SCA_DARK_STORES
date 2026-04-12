@@ -34,14 +34,15 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-RAW_DIR    = Path("data/raw")
+RAW_DIR = Path("data/raw")
 OUTPUT_DIR = Path("outputs")
-VIS_DIR    = Path("visualisations")
+VIS_DIR = Path("visualisations")
 
 
 # ---------------------------------------------------------------------------
 # Step 1 — Load & merge (orders + customers + geolocation) filtered to SP
 # ---------------------------------------------------------------------------
+
 
 def load_sp_sample(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
     """
@@ -55,25 +56,31 @@ def load_sp_sample(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
     """
     raw_dir = Path(raw_dir)
 
-    orders    = pd.read_csv(raw_dir / "olist_orders_dataset.csv",     low_memory=False)
-    customers = pd.read_csv(raw_dir / "olist_customers_dataset.csv",  low_memory=False)
-    geo       = pd.read_csv(raw_dir / "olist_geolocation_dataset.csv", low_memory=False)
+    orders = pd.read_csv(raw_dir / "olist_orders_dataset.csv", low_memory=False)
+    customers = pd.read_csv(raw_dir / "olist_customers_dataset.csv", low_memory=False)
+    geo = pd.read_csv(raw_dir / "olist_geolocation_dataset.csv", low_memory=False)
 
     # Geolocation: median lat/lon per zip code prefix (removes noise / outliers)
     geo_clean = (
-        geo.groupby("geolocation_zip_code_prefix")[["geolocation_lat", "geolocation_lng"]]
+        geo.groupby("geolocation_zip_code_prefix")[
+            ["geolocation_lat", "geolocation_lng"]
+        ]
         .median()
         .reset_index()
-        .rename(columns={
-            "geolocation_zip_code_prefix": "customer_zip_code_prefix",
-            "geolocation_lat": "customer_lat",
-            "geolocation_lng": "customer_lng",
-        })
+        .rename(
+            columns={
+                "geolocation_zip_code_prefix": "customer_zip_code_prefix",
+                "geolocation_lat": "customer_lat",
+                "geolocation_lng": "customer_lng",
+            }
+        )
     )
 
     # Filter to SP, then attach lat/lon
     sp_customers = customers[customers["customer_state"] == "SP"].copy()
-    sp_customers = sp_customers.merge(geo_clean, on="customer_zip_code_prefix", how="left")
+    sp_customers = sp_customers.merge(
+        geo_clean, on="customer_zip_code_prefix", how="left"
+    )
 
     # Merge with orders
     sp_sample = orders.merge(sp_customers, on="customer_id", how="inner")
@@ -87,6 +94,7 @@ def load_sp_sample(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
 # Step 2 — Load SP sellers (needed for Folium map)
 # ---------------------------------------------------------------------------
 
+
 def load_sp_sellers(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
     """
     Load sellers filtered to SP state with lat/lon attached.
@@ -97,18 +105,22 @@ def load_sp_sellers(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
     """
     raw_dir = Path(raw_dir)
 
-    sellers = pd.read_csv(raw_dir / "olist_sellers_dataset.csv",      low_memory=False)
-    geo     = pd.read_csv(raw_dir / "olist_geolocation_dataset.csv",  low_memory=False)
+    sellers = pd.read_csv(raw_dir / "olist_sellers_dataset.csv", low_memory=False)
+    geo = pd.read_csv(raw_dir / "olist_geolocation_dataset.csv", low_memory=False)
 
     geo_sell = (
-        geo.groupby("geolocation_zip_code_prefix")[["geolocation_lat", "geolocation_lng"]]
+        geo.groupby("geolocation_zip_code_prefix")[
+            ["geolocation_lat", "geolocation_lng"]
+        ]
         .median()
         .reset_index()
-        .rename(columns={
-            "geolocation_zip_code_prefix": "seller_zip_code_prefix",
-            "geolocation_lat": "seller_lat",
-            "geolocation_lng": "seller_lng",
-        })
+        .rename(
+            columns={
+                "geolocation_zip_code_prefix": "seller_zip_code_prefix",
+                "geolocation_lat": "seller_lat",
+                "geolocation_lng": "seller_lng",
+            }
+        )
     )
 
     sellers_sp = (
@@ -125,19 +137,20 @@ def load_sp_sellers(raw_dir: str | Path = RAW_DIR) -> pd.DataFrame:
 # Step 3 — Bounding box
 # ---------------------------------------------------------------------------
 
+
 def compute_bounding_box(sp_sample: pd.DataFrame) -> dict:
     """Return full-extent and IQR bounding box coordinates."""
     return {
-        "lat_min":  float(sp_sample["customer_lat"].min()),
-        "lat_max":  float(sp_sample["customer_lat"].max()),
-        "lon_min":  float(sp_sample["customer_lng"].min()),
-        "lon_max":  float(sp_sample["customer_lng"].max()),
-        "lat_q1":   float(sp_sample["customer_lat"].quantile(0.25)),
-        "lat_q3":   float(sp_sample["customer_lat"].quantile(0.75)),
-        "lon_q1":   float(sp_sample["customer_lng"].quantile(0.25)),
-        "lon_q3":   float(sp_sample["customer_lng"].quantile(0.75)),
-        "lat_med":  float(sp_sample["customer_lat"].median()),
-        "lon_med":  float(sp_sample["customer_lng"].median()),
+        "lat_min": float(sp_sample["customer_lat"].min()),
+        "lat_max": float(sp_sample["customer_lat"].max()),
+        "lon_min": float(sp_sample["customer_lng"].min()),
+        "lon_max": float(sp_sample["customer_lng"].max()),
+        "lat_q1": float(sp_sample["customer_lat"].quantile(0.25)),
+        "lat_q3": float(sp_sample["customer_lat"].quantile(0.75)),
+        "lon_q1": float(sp_sample["customer_lng"].quantile(0.25)),
+        "lon_q3": float(sp_sample["customer_lng"].quantile(0.75)),
+        "lat_med": float(sp_sample["customer_lat"].median()),
+        "lon_med": float(sp_sample["customer_lng"].median()),
         "n_orders": int(len(sp_sample)),
     }
 
@@ -145,6 +158,7 @@ def compute_bounding_box(sp_sample: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # Step 4 — Density scatter plot
 # ---------------------------------------------------------------------------
+
 
 def plot_density_scatter(
     sp_sample: pd.DataFrame,
@@ -158,7 +172,9 @@ def plot_density_scatter(
     plt.scatter(
         sp_sample["customer_lng"],
         sp_sample["customer_lat"],
-        alpha=0.15, s=5, color="steelblue",
+        alpha=0.15,
+        s=5,
+        color="steelblue",
     )
     plt.title("SP Customer Density Scatter", fontsize=14)
     plt.xlabel("Longitude")
@@ -173,6 +189,7 @@ def plot_density_scatter(
 # ---------------------------------------------------------------------------
 # Step 5 — Written spatial summary
 # ---------------------------------------------------------------------------
+
 
 def write_spatial_summary(
     sp_sample: pd.DataFrame,
@@ -224,6 +241,7 @@ BOUNDING BOX:
 # Step 6 — Save bounding box CSV
 # ---------------------------------------------------------------------------
 
+
 def save_bounding_box_csv(
     bb: dict,
     output_path: str | Path = OUTPUT_DIR / "sp_bounding_box.csv",
@@ -233,17 +251,17 @@ def save_bounding_box_csv(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = [
-        {"metric": "full_sp_lat_min",  "value": bb["lat_min"]},
-        {"metric": "full_sp_lat_max",  "value": bb["lat_max"]},
-        {"metric": "full_sp_lon_min",  "value": bb["lon_min"]},
-        {"metric": "full_sp_lon_max",  "value": bb["lon_max"]},
+        {"metric": "full_sp_lat_min", "value": bb["lat_min"]},
+        {"metric": "full_sp_lat_max", "value": bb["lat_max"]},
+        {"metric": "full_sp_lon_min", "value": bb["lon_min"]},
+        {"metric": "full_sp_lon_max", "value": bb["lon_max"]},
         {"metric": "core_iqr_lat_min", "value": bb["lat_q1"]},
         {"metric": "core_iqr_lat_max", "value": bb["lat_q3"]},
         {"metric": "core_iqr_lon_min", "value": bb["lon_q1"]},
         {"metric": "core_iqr_lon_max", "value": bb["lon_q3"]},
-        {"metric": "total_sp_orders",  "value": bb["n_orders"]},
-        {"metric": "suggested_k_min",  "value": 5},
-        {"metric": "suggested_k_max",  "value": 8},
+        {"metric": "total_sp_orders", "value": bb["n_orders"]},
+        {"metric": "suggested_k_min", "value": 5},
+        {"metric": "suggested_k_max", "value": 8},
     ]
     pd.DataFrame(rows).to_csv(output_path, index=False)
     print(f"[INFO] Bounding box CSV saved → {output_path}")
@@ -252,6 +270,7 @@ def save_bounding_box_csv(
 # ---------------------------------------------------------------------------
 # Step 7 — Interactive Folium map (Day 2 deliverable)
 # ---------------------------------------------------------------------------
+
 
 def build_folium_map(
     sp_sample: pd.DataFrame,
@@ -286,7 +305,9 @@ def build_folium_map(
     heat_data = sp_sample[["customer_lat", "customer_lng"]].dropna().values.tolist()
     HeatMap(
         heat_data,
-        radius=8, blur=12, min_opacity=0.3,
+        radius=8,
+        blur=12,
+        min_opacity=0.3,
         name="Customer density",
     ).add_to(m)
 
@@ -295,7 +316,10 @@ def build_folium_map(
     for _, row in sellers_sp.iterrows():
         folium.CircleMarker(
             location=[row["seller_lat"], row["seller_lng"]],
-            radius=4, color="red", fill=True, fill_opacity=0.6,
+            radius=4,
+            color="red",
+            fill=True,
+            fill_opacity=0.6,
             tooltip=row["seller_id"],
         ).add_to(seller_cluster)
 
@@ -310,10 +334,11 @@ def build_folium_map(
 # Full pipeline runner — called by main.py
 # ---------------------------------------------------------------------------
 
+
 def run(
-    raw_dir:    str | Path = RAW_DIR,
+    raw_dir: str | Path = RAW_DIR,
     output_dir: str | Path = OUTPUT_DIR,
-    vis_dir:    str | Path = VIS_DIR,
+    vis_dir: str | Path = VIS_DIR,
 ) -> pd.DataFrame:
     """
 
@@ -331,14 +356,14 @@ def run(
     sp_sample : pd.DataFrame  (passed downstream to clustering module)
     """
     output_dir = Path(output_dir)
-    vis_dir    = Path(vis_dir)
+    vis_dir = Path(vis_dir)
 
     # Day 1
-    sp_sample  = load_sp_sample(raw_dir)
-    bb         = compute_bounding_box(sp_sample)
-    plot_density_scatter(sp_sample,    output_dir / "sp_density_scatter.png")
+    sp_sample = load_sp_sample(raw_dir)
+    bb = compute_bounding_box(sp_sample)
+    plot_density_scatter(sp_sample, output_dir / "sp_density_scatter.png")
     write_spatial_summary(sp_sample, bb, output_dir / "sp_spatial_summary.txt")
-    save_bounding_box_csv(bb,          output_dir / "sp_bounding_box.csv")
+    save_bounding_box_csv(bb, output_dir / "sp_bounding_box.csv")
 
     # Day 2 — Folium map (requires sellers table)
     sellers_sp = load_sp_sellers(raw_dir)
@@ -348,8 +373,10 @@ def run(
     print(f"  Orders  : {bb['n_orders']:,}")
     print(f"  Sellers : {len(sellers_sp):,}")
     print(f"  Centre  : ({bb['lat_med']:.3f}, {bb['lon_med']:.3f})")
-    print(f"  Core    : {abs(bb['lat_q3']-bb['lat_q1'])*111:.0f} km x "
-          f"{abs(bb['lon_q3']-bb['lon_q1'])*89:.0f} km")
+    print(
+        f"  Core    : {abs(bb['lat_q3']-bb['lat_q1'])*111:.0f} km x "
+        f"{abs(bb['lon_q3']-bb['lon_q1'])*89:.0f} km"
+    )
 
     return sp_sample
 
