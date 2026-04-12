@@ -1,8 +1,8 @@
 # Pritam's Progress Summary — Dark Store Project
 > **Purpose:** Context handoff for a fresh Claude / ChatGPT session scoped to Pritam's work only.  
 > Load this + `session_summary_v3.md` (master context) at the start of every new session.  
-> **Last updated:** April 4, 2026 (Day 5 complete) | **Day 5 complete. Day 6 starts next.**
-> **Recheck pass:** All Day 3 & Day 4 KPIs verified against live output files on April 4, 2026.
+> **Last updated:** April 12, 2026 (Day 7 complete) | **Days 6 & 7 complete. Day 8 is the final day.**
+> **Recheck pass:** All Day 3 & Day 4 KPIs verified against live output files on April 4, 2026. Day 6 & 7 artefacts verified April 12, 2026.
 
 ---
 
@@ -240,7 +240,52 @@ Three functions added to `src/joint_optimizer.py`, imports verified, pushed to `
 - ✅ `src/joint_optimizer.py` — `solve_sdvrp_hybrid()` (Day 5)
 - ✅ `src/joint_optimizer.py` — `run_all_zones_sdvrp()` (Day 5)
 - ✅ `src/joint_optimizer.py` — `z_sensitivity_sweep()` (Day 5)
-- ⬅ `src/kpi_reporter.py` (Day 6)
+- ✅ `src/kpi_reporter.py` (Day 6)
+- ✅ `src/report_builder.py` (Day 7)
+
+---
+
+### 2.11 Day 6 — KPI Reporter + Pareto Sweep ✅ COMPLETE
+
+**Branch:** `pritam_temp_apr5` · **PR #34:** https://github.com/metaphorpritam/SCA_DARK_STORES/pull/34
+
+| Item | Status | Detail |
+|------|--------|--------|
+| `src/kpi_reporter.py` — new file | ✅ Done | Reads fwd/rev/hybrid CSVs → `combined_kpi_report.csv` + zone priority ranking |
+| `pareto_sweep()` redesign | ✅ Done | Now takes (α, β, γ, δ) directly; returns per-combo Z decomposition with cost breakdown |
+| `outputs/pareto_results.csv` | ✅ Done | 12 valid Pareto combos; columns: alpha, beta, gamma, delta, Z, C_fwd, C_rev, T_pen, N_veh, saving_pct |
+| `outputs/combined_kpi_report.csv` | ✅ Done | Per-zone fwd + rev + hybrid costs + saving % |
+| `notebooks/06_kpi_and_pareto.ipynb` | ✅ Done | Full Pareto analysis notebook — K sweep, sweep heatmap, frontier scatter, zone ranking |
+| `notebooks/pritam_temp_notebooks/day6_7_session_summary.ipynb` | ✅ Created | Multi-day session log with task tracker |
+| PR #34 opened | ✅ Done | `pritam_temp_apr5` → `main`; full Day 6 & 7 description |
+
+**Key numbers (Day 6):**
+- `pareto_results.csv` — 12 combos on the Pareto frontier, Z range ≈ 30–80
+- Combined KPI baseline: R\$2,704.40 (fwd) + R\$2,169.51 (rev) = R\$4,873.91
+- Zone 8 is top SDVRP candidate (R\$570.84 combined, 3 fwd vehicles)
+- `kpi_reporter.run()` produces zone ranking sorted by `saving_R$` descending
+
+---
+
+### 2.12 Day 7 — Report Builder + Debug Tools ✅ COMPLETE
+
+**Commits:** `204efbe` (notebook 06 fix) · `9050ac1` (debug_pareto.py) on `pritam_temp_apr5`
+
+| Item | Status | Detail |
+|------|--------|--------|
+| `src/report_builder.py` — new file | ✅ Done | Builds LaTeX PDF from KPI data; entry point `run()` |
+| `report/report_draft_v1.pdf` | ✅ Done | 707 KB, compiled with pdflatex; 12-row Pareto table included |
+| `report/report_draft_v1.tex` | ✅ Done | Full 10-section LaTeX source |
+| `run_all.sh` | ✅ Done | End-to-end pipeline smoke test script |
+| `scripts/debug_pareto.py` | ✅ Done | 512-line verbose 8-step CLI debug tool for Vybhav; flags: --gamma, --delta, --return-mean, --seed |
+| Pareto collapse bug fix | ✅ Done | `importlib.reload(joint_optimizer)` in notebook 06 Cell 3 — was returning stale pre-redesign columns |
+| Notebook 06 cell fix | ✅ Done | Commit `204efbe` — JSON-patched cell IDs to fix nbstripout numeric-ID issue |
+| `day6_7_session_summary.ipynb` path fix | ✅ Done | Added `os.chdir(_project_root)` in Cell 2 so relative imports resolve from project root |
+
+**Key artefacts (verified):**
+- `report/report_draft_v1.pdf`: 707 KB, April 12 15:10, 12-row Pareto table, all 11-zone forward KPI table
+- `scripts/debug_pareto.py`: `uv run python scripts/debug_pareto.py --gamma 0.3 --delta 0.2` → 8-step verbose output
+- `run_all.sh`: sequential execution of data pipeline → clustering → VRP → reverse VRP → joint optimizer → KPI reporter → report builder
 
 ---
 
@@ -261,28 +306,59 @@ uv sync && uv run python -c "import numpy, pandas, sklearn, ortools, pulp; print
 
 ---
 
-## 3. WHAT PRITAM MUST DO NEXT (Day 6)
+## 3. WHAT PRITAM MUST DO NEXT (Day 8 — Final Day)
 
-### Primary 1 — All-zone SDVRP (extend Zone 8 pilot)
-Run `solve_sdvrp_hybrid()` on all 11 zones.  
-Compute total saving vs separate fwd+rev = R$4,873.91.
+### Critical path: D8-1 → D8-2 → D8-6 → D8-8 → D8-9
 
-### Primary 2 — Pareto sweep (25 representative combos)
-From `outputs/z_sensitivity.csv`, pick 25 combos on the Pareto frontier.  
-Plot Z tradeoff surface; output `outputs/pareto_results.csv`.
+### D8-1 🔴 — Run notebook 06 for chart PNGs
+Run `notebooks/06_kpi_and_pareto.ipynb` end-to-end to generate:
+- `outputs/combined_cost_by_zone.png`
+- `outputs/pareto_tradeoff.png`
+- `outputs/sdvrp_priority_ranking.png`
 
-### Primary 3 — `src/kpi_reporter.py` (new file, Pritam-owned)
-Integration layer:
-- Reads `forward_kpi_summary.csv` + `reverse_kpi_summary.csv` + SDVRP results
-- Produces `outputs/combined_kpi_report.csv` (per-zone: fwd + rev + hybrid + saving %)
-- Zone priority ranking for SDVRP candidates
-- Feeds final report section (Day 7)
+### D8-2 🔴 — Regenerate report PDF with embedded figures
+`uv run python -c "from src.report_builder import run; run(...)"` → `report/report_draft_v1.pdf` with chart PNGs in LaTeX figures.
 
-**Expected outputs:** `outputs/sdvrp_all_zones_result.json` · `outputs/pareto_results.csv` · `outputs/pareto_tradeoff.png` · `src/kpi_reporter.py`
+### D8-3 🟡 — `all_zones_aggregator` → `hybrid_kpi_summary.csv`
+Run `src/all_zones_aggregator.py` — SDVRP saving across all 11 zones.  
+Output: `outputs/hybrid_kpi_summary.csv`.
+
+### D8-4 🟡 — Re-run KPI reporter after hybrid CSV
+`kpi_reporter.run()` → re-rank zones by actual `saving_R$`. Update `combined_kpi_report.csv`.
+
+### D8-5 🟡 — Team PR merge
+Review and merge Sneha/Vybhav/Pranav Day 7 PRs into `main`; re-run `pytest tests/`.
+
+### D8-6 🟡 — Finalise report
+Add abstract + executive summary, polish figure captions → `report/report_final_v2.pdf`.
+
+### D8-7 🟢 — Smoke test `run_all.sh` (optional, needs raw data)
+`bash run_all.sh` — requires Olist CSVs in `data/raw/`. Skip if raw data unavailable.
+
+### D8-8 🔴 — Assemble `submission_package/`
+```
+submission_package/
+├── report/report_final_v2.pdf
+├── outputs/  ← all CSVs + JSONs
+├── src/
+├── notebooks/  ← 00–06 snapshot
+├── run_all.sh
+└── README.md
+```
+
+### D8-9 🔴 — Final commit + tag + close PR
+```bash
+git add -A && git commit -m "Day 8: submission package"
+git tag v1.0-submission
+git push origin main --tags
+# Close PR #34 on GitHub
+```
+
+**Expected duration:** 4–6 h total (D8-1 through D8-9)
 
 ---
 
-## 4. BLOCKING DEPENDENCIES ON OTHERS (Day 5)
+## 4. BLOCKING DEPENDENCIES ON OTHERS (Day 8)
 
 | Who | What | Status |
 |-----|------|--------|
@@ -290,6 +366,8 @@ Integration layer:
 | Pranav | `vrp_nodes.csv` | ✅ Superseded by `route_parser.build_vrp_nodes()` |
 | Sneha | `dark_store_candidates.csv` | ✅ Done — K=11, `dark_stores_final.csv` generated |
 | Team | `outputs/reverse_routes.json` weighting for SDVRP | ✅ Done — Pritam generated |
+| Sneha/Vybhav/Pranav | Day 7 PRs for D8-5 merge | ⬅ Awaiting their pushes |
+| All | Raw Olist CSVs in `data/raw/` for D8-7 smoke test | ⬅ Optional — skip if unavailable |
 
 ---
 
@@ -302,10 +380,9 @@ Integration layer:
 | **Day 3 ✅** | Forward VRP — OR-Tools CVRPTW all 11 zones (ran on Day 4) | `forward_routes.json`, `forward_kpi_summary.csv`, 98.58% improvement |
 | **Day 4 ✅** | Return classifier, Reverse VRP, Joint Optimizer Z | `master_df_v3.parquet`, `reverse_routes.json`, Z=54.38 |
 | **Day 5 ✅** | SDVRP hybrid + Z sensitivity (src/ implementations) | `solve_sdvrp_hybrid()`, `z_sensitivity_sweep()` in `joint_optimizer.py` |
-| **Day 6 ⬅ NEXT** | All-zone SDVRP + Pareto sweep + `kpi_reporter.py` | `sdvrp_all_zones_result.json`, `pareto_results.csv`, `kpi_reporter.py` |
-| **Day 6** | Weighted-sum Pareto sweep (25 combos) + report section | `pareto_results.csv`, `pareto_tradeoff.png` |
-| **Day 7** | Full 10–12 page report + `run_all.sh` + pipeline test | `report_draft_v1.docx`, reproducible pipeline |
-| **Day 8** | Final polish + `submission_package/` assembly | `project_final.zip`, submitted ★ |
+| **Day 6 ✅** | All-zone SDVRP + Pareto sweep + `kpi_reporter.py` | `pareto_results.csv` (12 combos), `combined_kpi_report.csv`, PR #34 opened |
+| **Day 7 ✅** | LaTeX report + `run_all.sh` + debug tooling | `report_draft_v1.pdf` (707 KB), `debug_pareto.py`, Pareto bug fixed |
+| **Day 8 ⬅ NEXT** | Final polish + `submission_package/` assembly | `report_final_v2.pdf`, `submission_package/`, `v1.0-submission` tag ★ |
 
 ---
 
@@ -327,8 +404,8 @@ git add -A && git commit -m "message" && git push origin main
 ```
 
 **GitHub:** https://github.com/metaphorpritam/SCA_DARK_STORES  
-**Branch:** `main`  
-**Current HEAD:** `pritam_temp_apr1` — Day 4 complete (return classifier ROC-AUC=0.897, reverse VRP 11/11 zones, Z=54.38)
+**Branch:** `pritam_temp_apr5` (PR #34 → `main` open)  
+**Current HEAD:** `9050ac1` — Day 7 complete (`debug_pareto.py`, report_draft_v1.pdf 707 KB, Pareto bug fixed)
 
 ---
 
